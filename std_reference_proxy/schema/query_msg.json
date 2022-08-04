@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryMsg",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "owner"
+      ],
+      "properties": {
+        "owner": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_reference_data"
+      ],
+      "properties": {
+        "get_reference_data": {
+          "type": "object",
+          "required": [
+            "base_symbol",
+            "quote_symbol"
+          ],
+          "properties": {
+            "base_symbol": {
+              "type": "string"
+            },
+            "quote_symbol": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_reference_data_bulk"
+      ],
+      "properties": {
+        "get_reference_data_bulk": {
+          "type": "object",
+          "required": [
+            "base_symbols",
+            "quote_symbols"
+          ],
+          "properties": {
+            "base_symbols": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "quote_symbols": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

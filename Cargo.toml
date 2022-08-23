@@ -1,0 +1,2 @@
+[workspace]
+members = ["std_reference_basic", "std_reference_proxy"]

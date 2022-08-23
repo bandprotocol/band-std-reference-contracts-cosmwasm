@@ -8,7 +8,7 @@ pub struct InstantiateMsg {}
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    TransferOwnership {
+    UpdateConfig {
         new_owner: Addr,
     },
     AddRelayers {
@@ -34,7 +34,7 @@ pub enum ExecuteMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
-    Owner {},
+    Config {},
     IsRelayer {
         relayer: Addr,
     },

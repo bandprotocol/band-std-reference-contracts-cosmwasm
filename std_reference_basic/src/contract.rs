@@ -1,43 +1,13 @@
-use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{
-    owner_store, read_owner_store, ref_data_store, read_ref_data_store, relayers_store,
-    read_relayers_store
-};
-use crate::struct_types::{RefData, ReferenceData};
 use cosmwasm_std::{
-    entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response,
-    StdError, StdResult, Storage, Uint128,
+    entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
+    StdResult, Uint128,
 };
+
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::state::{CONFIG, REFDATA, RELAYERS};
+use crate::struct_types::{Config, RefData, ReferenceData, Relayer};
 
 pub static E9: u128 = 1_000_000_000;
-
-macro_rules! zip {
-    ($x: expr) => ($x);
-    ($x: expr, $($y: expr), +) => (
-        $x.iter().map(|v| v.clone()).zip(zip!($($y.clone()), +))
-    )
-}
-
-macro_rules! unwrap_or_return_err {
-    ( $e:expr ) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => return Err(e),
-        }
-    };
-}
-
-macro_rules! unwrap_query {
-    ( $e:expr, $f:expr ) => {
-        match $e {
-            Ok(x) => match to_binary(&x) {
-                Ok(y) => Ok(y),
-                Err(_) => Err(StdError::generic_err($f)),
-            },
-            Err(e) => return Err(e),
-        }
-    };
-}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -46,7 +16,7 @@ pub fn instantiate(
     info: MessageInfo,
     _msg: InstantiateMsg,
 ) -> StdResult<Response> {
-    owner_store(deps.storage).save(&deps.api.addr_canonicalize(&info.sender.as_str())?)?;
+    CONFIG.save(deps.storage, &Config { owner: info.sender })?;
     Ok(Response::default())
 }
 
@@ -58,86 +28,79 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> StdResult<Response> {
     match msg {
-        ExecuteMsg::TransferOwnership { new_owner } => {
-            try_transfer_ownership(deps, info, new_owner)
-        }
-        ExecuteMsg::AddRelayers { relayers } => try_add_relayers(deps, info, relayers),
-        ExecuteMsg::RemoveRelayers { relayers } => try_remove_relayers(deps, info, relayers),
+        ExecuteMsg::UpdateConfig { new_owner } => execute_update_config(deps, info, new_owner),
+        ExecuteMsg::AddRelayers { relayers } => execute_add_relayers(deps, info, relayers),
+        ExecuteMsg::RemoveRelayers { relayers } => execute_remove_relayers(deps, info, relayers),
         ExecuteMsg::Relay {
             symbols,
             rates,
             resolve_time,
             request_id,
-        } => try_relay(deps, info, symbols, rates, resolve_time, request_id),
+        } => execute_relay(deps, info, symbols, rates, resolve_time, request_id),
         ExecuteMsg::ForceRelay {
             symbols,
             rates,
             resolve_time,
             request_id,
-        } => try_force_relay(deps, info, symbols, rates, resolve_time, request_id),
+        } => execute_force_relay(deps, info, symbols, rates, resolve_time, request_id),
     }
 }
 
-pub fn try_transfer_ownership(
+pub fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,
     new_owner: Addr,
 ) -> StdResult<Response> {
-    let owner_addr = read_owner_store(deps.storage).load()?;
-    if deps.api.addr_canonicalize(&info.sender.as_str())? != owner_addr {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
         return Err(StdError::generic_err("NOT_AUTHORIZED"));
     }
 
-    owner_store(deps.storage).save(&deps.api.addr_canonicalize(&new_owner.as_str())?)?;
+    config.owner = new_owner;
 
-    Ok(Response::default())
+    CONFIG.save(deps.storage, &config)?;
+
+    Ok(Response::new().add_attribute("action", "update_config"))
 }
 
-pub fn try_add_relayers(
+pub fn execute_add_relayers(
     deps: DepsMut,
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    let api = deps.api;
-    let owner_addr = read_owner_store(deps.storage).load()?;
-    if api.addr_canonicalize(&info.sender.as_str())? != owner_addr {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
         return Err(StdError::generic_err("NOT_AUTHORIZED"));
     }
 
-    let mut relayers_store = relayers_store(deps.storage);
-    for relayer in relayers {
-        relayers_store.set(
-            relayer.to_string().as_bytes(),
-            &bincode::serialize(&true).unwrap(),
-        );
+    for relayer_addr in relayers {
+        let relayer = Relayer {
+            address: relayer_addr.clone(),
+        };
+        RELAYERS.save(deps.storage, &relayer_addr.to_string(), &relayer)?;
     }
 
-    Ok(Response::default())
+    Ok(Response::new().add_attribute("action", "add_relayers"))
 }
 
-pub fn try_remove_relayers(
+pub fn execute_remove_relayers(
     deps: DepsMut,
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    let api = deps.api;
-    let owner_addr = read_owner_store(deps.storage).load()?;
-    if api.addr_canonicalize(&info.sender.as_str())? != owner_addr {
+    let config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
         return Err(StdError::generic_err("NOT_AUTHORIZED"));
     }
 
-    let mut relayers_store = relayers_store(deps.storage);
-    for relayer in relayers {
-        relayers_store.set(
-            relayer.to_string().as_bytes(),
-            &bincode::serialize(&false).unwrap(),
-        );
+    for relayer_addr in relayers {
+        RELAYERS.remove(deps.storage, &relayer_addr.to_string());
     }
 
-    Ok(Response::default())
+    Ok(Response::new().add_attribute("action", "remove_relayers"))
 }
 
-pub fn try_relay(
+pub fn execute_relay(
     deps: DepsMut,
     info: MessageInfo,
     symbols: Vec<String>,
@@ -145,34 +108,39 @@ pub fn try_relay(
     resolve_time: u64,
     request_id: u64,
 ) -> StdResult<Response> {
-    let size = symbols.len();
-    if !(rates.len() == size) {
-        return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
-    }
-
-    let is_relayer = query_is_relayer(deps.as_ref(), info.sender.clone())?;
-    if !is_relayer {
+    if !query_is_relayer(deps.as_ref(), info.sender).unwrap() {
         return Err(StdError::generic_err("NOT_A_RELAYER"));
     }
 
-    let mut refs = ref_data_store(deps.storage);
-    for (s, r) in zip!(&symbols, &rates) {
-        let ref_data = refs
-            .get(&s.as_bytes())
-            .map(|b| bincode::deserialize::<RefData>(&b).unwrap());
+    if !(rates.len() == symbols.len()) {
+        return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
+    }
 
-        if ref_data.is_none() || resolve_time > ref_data.unwrap().resolve_time {
-            refs.set(
-                s.as_bytes(),
-                &bincode::serialize(&RefData::new(r, resolve_time, request_id)).unwrap(),
-            );
+    for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
+        match REFDATA.may_load(deps.storage, &symbol)? {
+            Some(existing_refdata) => {
+                if existing_refdata.resolve_time < resolve_time {
+                    REFDATA.save(
+                        deps.storage,
+                        &symbol,
+                        &RefData::new(rate, resolve_time, request_id),
+                    )?;
+                } else {
+                    return Err(StdError::generic_err("INVALID_RESOLVE_TIME"));
+                }
+            }
+            None => REFDATA.save(
+                deps.storage,
+                &symbol,
+                &RefData::new(rate, resolve_time, request_id),
+            )?,
         }
     }
 
-    Ok(Response::default())
+    Ok(Response::default().add_attribute("action", "execute_relay"))
 }
 
-pub fn try_force_relay(
+pub fn execute_force_relay(
     deps: DepsMut,
     info: MessageInfo,
     symbols: Vec<String>,
@@ -180,65 +148,57 @@ pub fn try_force_relay(
     resolve_time: u64,
     request_id: u64,
 ) -> StdResult<Response> {
-    let size = symbols.len();
-    if !(rates.len() == size) {
-        return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
-    }
-
-    let is_relayer = query_is_relayer(deps.as_ref(), info.sender.clone())?;
-    if !is_relayer {
+    if !query_is_relayer(deps.as_ref(), info.sender).unwrap() {
         return Err(StdError::generic_err("NOT_A_RELAYER"));
     }
 
-    let mut refs = ref_data_store(deps.storage);
-    for (s, r) in zip!(&symbols, &rates) {
-        refs.set(
-            s.as_bytes(),
-            &bincode::serialize(&RefData::new(r, resolve_time, request_id)).unwrap(),
-        );
+    if !(rates.len() == symbols.len()) {
+        return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
     }
 
-    Ok(Response::default())
+    for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
+        REFDATA.save(
+            deps.storage,
+            &symbol,
+            &RefData::new(rate, resolve_time, request_id),
+        )?;
+    }
+
+    Ok(Response::default().add_attribute("action", "execute_force_relay"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::Owner {} => unwrap_query!(query_owner(deps), "SERIALIZE_OWNER_ERROR"),
-        QueryMsg::IsRelayer { relayer } => {
-            unwrap_query!(query_is_relayer(deps, relayer), "SERIALIZE_RELAYER_ERROR")
-        }
-        QueryMsg::GetRef { symbol } => {
-            unwrap_query!(query_ref(deps, symbol), "SERIALIZE_REF_DATA_ERROR")
-        }
+        QueryMsg::Config {} => to_binary(&query_config(deps)?),
+        QueryMsg::IsRelayer { relayer } => to_binary(&query_is_relayer(deps, relayer)?),
+        QueryMsg::GetRef { symbol } => to_binary(&query_ref(deps, symbol)?),
         QueryMsg::GetReferenceData {
             base_symbol,
             quote_symbol,
-        } => unwrap_query!(
-            query_reference_data(deps, base_symbol, quote_symbol),
-            "SERIALIZE_REFERENCE_DATA_ERROR"
-        ),
+        } => to_binary(&query_reference_data(deps, base_symbol, quote_symbol)?),
         QueryMsg::GetReferenceDataBulk {
             base_symbols,
             quote_symbols,
-        } => unwrap_query!(
-            query_reference_data_bulk(deps, base_symbols, quote_symbols,),
-            "SERIALIZE_REFERENCE_DATA_BULK_ERROR"
-        ),
+        } => to_binary(&query_reference_data_bulk(
+            deps,
+            base_symbols,
+            quote_symbols,
+        )?),
     }
 }
 
-fn query_owner(deps: Deps) -> StdResult<Addr> {
-    read_owner_store(deps.storage)
-        .load()
-        .map(|ca| deps.api.addr_humanize(&ca).unwrap())
-        .map_err(|_| StdError::generic_err("OWNER_NOT_INITIALIZED"))
+fn query_config(deps: Deps) -> StdResult<Addr> {
+    match CONFIG.may_load(deps.storage)? {
+        Some(config) => Ok(config.owner),
+        None => Err(StdError::generic_err("CONFIG_NOT_INITIALIZED")),
+    }
 }
 
 fn query_is_relayer(deps: Deps, relayer: Addr) -> StdResult<bool> {
-    match read_relayers_store(deps.storage).get(&relayer.as_bytes()) {
-        Some(data) => Ok(bincode::deserialize(&data).unwrap()),
-        _ => Ok(false),
+    match RELAYERS.may_load(deps.storage, &relayer.to_string())? {
+        Some(_relayer) => Ok(true),
+        None => Ok(false),
     }
 }
 
@@ -246,19 +206,11 @@ fn query_ref(deps: Deps, symbol: String) -> StdResult<RefData> {
     if symbol == String::from("USD") {
         return Ok(RefData::new(Uint128::new(E9), u64::MAX, 0));
     }
-    match read_ref_data_store(deps.storage).get(&symbol.as_bytes()) {
-        Some(data) => {
-            let r: RefData = bincode::deserialize(&data).unwrap();
-            if r.rate == Uint128::zero() || r.resolve_time == 0 {
-                return Err(StdError::generic_err(format!(
-                    "REF_DATA_NOT_AVAILABLE_FOR_KEY:{}",
-                    symbol
-                )));
-            }
-            Ok(r)
-        }
-        _ => Err(StdError::generic_err(format!(
-            "REF_DATA_NOT_AVAILABLE_FOR_KEY:{}",
+
+    match REFDATA.may_load(deps.storage, &symbol)? {
+        Some(refdata) => Ok(refdata),
+        None => Err(StdError::generic_err(format!(
+            "REF_DATA_NOT_AVAILABLE_FOR_{}",
             symbol
         ))),
     }
@@ -269,10 +221,11 @@ fn query_reference_data(
     base_symbol: String,
     quote_symbol: String,
 ) -> StdResult<ReferenceData> {
-    let base = unwrap_or_return_err!(query_ref(deps, base_symbol));
-    let quote = unwrap_or_return_err!(query_ref(deps, quote_symbol));
+    let base: RefData = query_ref(deps, base_symbol)?;
+    let quote: RefData = query_ref(deps, quote_symbol)?;
     let base_rate: u128 = base.rate.into();
     let quote_rate: u128 = quote.rate.into();
+
     Ok(ReferenceData::new(
         Uint128::new((base_rate * E9 * E9) / quote_rate),
         base.resolve_time,
@@ -288,6 +241,7 @@ fn query_reference_data_bulk(
     if base_symbols.len() != quote_symbols.len() {
         return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
     }
+
     base_symbols
         .iter()
         .zip(quote_symbols.iter())
@@ -297,18 +251,19 @@ fn query_reference_data_bulk(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use cosmwasm_std::testing::{
         mock_dependencies, mock_env, mock_info, MockApi, MockQuerier, MockStorage,
     };
     use cosmwasm_std::{coins, from_binary, Coin, OwnedDeps, StdError, Timestamp};
+
+    use super::*;
 
     fn init_msg() -> InstantiateMsg {
         InstantiateMsg {}
     }
 
     fn execute_transfer_ownership(o: &str) -> ExecuteMsg {
-        ExecuteMsg::TransferOwnership {
+        ExecuteMsg::UpdateConfig {
             new_owner: Addr::unchecked(String::from(o)),
         }
     }
@@ -359,8 +314,8 @@ mod tests {
         }
     }
 
-    fn query_owner_msg() -> QueryMsg {
-        QueryMsg::Owner {}
+    fn query_config_msg() -> QueryMsg {
+        QueryMsg::Config {}
     }
 
     fn query_is_relayer_msg(r: &str) -> QueryMsg {
@@ -417,9 +372,9 @@ mod tests {
         let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
 
         // owner not initialized yet
-        match query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap_err() {
-            StdError::GenericErr { msg, .. } => assert_eq!("OWNER_NOT_INITIALIZED", msg),
-            _ => panic!("Test Fail: expect OWNER_NOT_INITIALIZED"),
+        match query(deps.as_ref(), env.clone(), query_config_msg()).unwrap_err() {
+            StdError::GenericErr { msg, .. } => assert_eq!("CONFIG_NOT_INITIALIZED", msg),
+            _ => panic!("Test Fail: expect CONFIG_NOT_INITIALIZED"),
         }
 
         // Check if successfully set owner
@@ -427,7 +382,7 @@ mod tests {
         assert_eq!(0, res.messages.len());
 
         // should be able to query
-        let encoded_owner = query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap();
+        let encoded_owner = query(deps.as_ref(), env.clone(), query_config_msg()).unwrap();
         // Verify correct owner address
         assert_eq!(
             String::from("owner"),
@@ -451,9 +406,8 @@ mod tests {
         // check owner in the state
         assert_eq!(
             String::from("owner"),
-            from_binary::<Addr>(
-                &query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap()
-            ).unwrap()
+            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
+                .unwrap()
         );
 
         let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 789, 0);
@@ -488,10 +442,8 @@ mod tests {
         // // check owner in the state
         assert_eq!(
             String::from("owner"),
-            from_binary::<Addr>(
-                &query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap()
-            )
-            .unwrap()
+            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
+                .unwrap()
         );
 
         // should successfully set new owner
@@ -501,7 +453,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_transfer_ownership("new_owner")
+                execute_transfer_ownership("new_owner"),
             )
             .unwrap()
             .messages
@@ -511,10 +463,8 @@ mod tests {
         // check owner in the state should be new_owner
         assert_eq!(
             String::from("new_owner"),
-            from_binary::<Addr>(
-                &query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap()
-            )
-            .unwrap()
+            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
+                .unwrap()
         );
     }
 
@@ -568,7 +518,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(test_relayers.clone())
+                execute_add_relayer(test_relayers.clone()),
             )
             .unwrap()
             .messages
@@ -593,7 +543,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_remove_relayer(test_relayers.clone())
+                execute_remove_relayer(test_relayers.clone()),
             )
             .unwrap()
             .messages
@@ -682,7 +632,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(vec!["owner"])
+                execute_add_relayer(vec!["owner"]),
             )
             .unwrap()
             .messages
@@ -710,11 +660,11 @@ mod tests {
                     vec![
                         Uint128::from(1 * E9),
                         Uint128::from(2 * E9),
-                        Uint128::from(3 * E9)
+                        Uint128::from(3 * E9),
                     ],
                     100,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -742,11 +692,11 @@ mod tests {
                     vec![
                         Uint128::from(4 * E9),
                         Uint128::from(5 * E9),
-                        Uint128::from(6 * E9)
+                        Uint128::from(6 * E9),
                     ],
                     110,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -787,7 +737,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(vec!["owner"])
+                execute_add_relayer(vec!["owner"]),
             )
             .unwrap()
             .messages
@@ -814,36 +764,56 @@ mod tests {
                     vec!["A".into(), "B".into()],
                     vec![Uint128::from(1 * E9), Uint128::from(2 * E9)],
                     100,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
             .len()
         );
 
-        // should successfully relay second time
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(4 * E9),
-                        Uint128::from(5 * E9),
-                        Uint128::from(6 * E9)
-                    ],
-                    90,
-                    1
-                )
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
+        // should not relay second time
+        // assert_eq!(
+        //     0,
+        //     execute(
+        //         deps.as_mut(),
+        //         env.clone(),
+        //         info.clone(),
+        //         execute_relay(
+        //             vec!["A".into(), "B".into(), "C".into()],
+        //             vec![
+        //                 Uint128::from(4 * E9),
+        //                 Uint128::from(5 * E9),
+        //                 Uint128::from(6 * E9),
+        //             ],
+        //             90,
+        //             1,
+        //         ),
+        //     )
+        //     .unwrap()
+        //     .messages
+        //     .len()
+        // );
+        match execute(
+            deps.as_mut(),
+            env.clone(),
+            info.clone(),
+            execute_relay(
+                vec!["A".into(), "B".into(), "C".into()],
+                vec![
+                    Uint128::from(4 * E9),
+                    Uint128::from(5 * E9),
+                    Uint128::from(6 * E9),
+                ],
+                90,
+                1,
+            ),
+        )
+        .unwrap_err()
+        {
+            StdError::GenericErr { msg, .. } => assert_eq!("INVALID_RESOLVE_TIME", msg),
+            _ => panic!("Test Fail: expect INVALID_RESOLVE_TIME"),
+        }
 
         // check ref data is correct. A should be data from the first time.
         assert_eq!(
@@ -863,14 +833,17 @@ mod tests {
             .unwrap()
         );
 
-        // check ref data is correct. C should be data from the second time.
-        assert_eq!(
-            RefData::new(Uint128::from(6 * E9), 90, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("C".into())).unwrap()
-            )
-            .unwrap()
-        );
+        // check ref data is correct. C should not be available
+
+        match query(deps.as_ref(), env.clone(), query_ref_data_msg("C".into())).unwrap_err() {
+            StdError::GenericErr { msg, .. } => assert_eq!("REF_DATA_NOT_AVAILABLE_FOR_C", msg),
+            _ => panic!("Test Fail: expect REF_DATA_NOT_AVAILABLE_FOR_C"),
+        }
+
+        // match query_ref_data_msg("C".into()).unwrap() {
+        //     StdError::GenericErr { msg, .. } => assert_eq!("REF_DATA_NOT_AVAILABLE_FOR_C", msg),
+        //     _ => panic!("Test Fail: expect REF_DATA_NOT_AVAILABLE_FOR_C"),
+        // }
     }
 
     #[test]
@@ -897,7 +870,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(vec!["owner"])
+                execute_add_relayer(vec!["owner"]),
             )
             .unwrap()
             .messages
@@ -924,8 +897,8 @@ mod tests {
                     vec!["A".into(), "B".into()],
                     vec![Uint128::from(1 * E9), Uint128::from(2 * E9)],
                     100,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -944,11 +917,11 @@ mod tests {
                     vec![
                         Uint128::from(4 * E9),
                         Uint128::from(5 * E9),
-                        Uint128::from(6 * E9)
+                        Uint128::from(6 * E9),
                     ],
                     90,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -1007,7 +980,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(vec!["owner"])
+                execute_add_relayer(vec!["owner"]),
             )
             .unwrap()
             .messages
@@ -1035,11 +1008,11 @@ mod tests {
                     vec![
                         Uint128::from(1 * E9),
                         Uint128::from(2 * E9),
-                        Uint128::from(3 * E9)
+                        Uint128::from(3 * E9),
                     ],
                     100,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -1053,7 +1026,7 @@ mod tests {
                 &query(
                     deps.as_ref(),
                     env.clone(),
-                    query_reference_data_msg("A".into(), "B".into())
+                    query_reference_data_msg("A".into(), "B".into()),
                 )
                 .unwrap()
             )
@@ -1067,7 +1040,7 @@ mod tests {
                 &query(
                     deps.as_ref(),
                     env.clone(),
-                    query_reference_data_msg("A".into(), "C".into())
+                    query_reference_data_msg("A".into(), "C".into()),
                 )
                 .unwrap()
             )
@@ -1081,7 +1054,7 @@ mod tests {
                 &query(
                     deps.as_ref(),
                     env.clone(),
-                    query_reference_data_msg("A".into(), "USD".into())
+                    query_reference_data_msg("A".into(), "USD".into()),
                 )
                 .unwrap()
             )
@@ -1113,7 +1086,7 @@ mod tests {
                 deps.as_mut(),
                 env.clone(),
                 info.clone(),
-                execute_add_relayer(vec!["owner"])
+                execute_add_relayer(vec!["owner"]),
             )
             .unwrap()
             .messages
@@ -1141,11 +1114,11 @@ mod tests {
                     vec![
                         Uint128::from(1 * E9),
                         Uint128::from(2 * E9),
-                        Uint128::from(3 * E9)
+                        Uint128::from(3 * E9),
                     ],
                     100,
-                    1
-                )
+                    1,
+                ),
             )
             .unwrap()
             .messages
@@ -1157,7 +1130,7 @@ mod tests {
             vec![
                 ReferenceData::new(Uint128::from(E9 * E9 / 3), 100, 100),
                 ReferenceData::new(Uint128::from(2 * E9 * E9), 100, u64::MAX),
-                ReferenceData::new(Uint128::from(3 * E9 * E9 / 2), 100, 100)
+                ReferenceData::new(Uint128::from(3 * E9 * E9 / 2), 100, 100),
             ],
             from_binary::<Vec<ReferenceData>>(
                 &query(
@@ -1165,8 +1138,8 @@ mod tests {
                     env.clone(),
                     query_reference_data_bulk_msg(
                         vec!["A".into(), "B".into(), "C".into()],
-                        vec!["C".into(), "USD".into(), "B".into()]
-                    )
+                        vec!["C".into(), "USD".into(), "B".into()],
+                    ),
                 )
                 .unwrap()
             )

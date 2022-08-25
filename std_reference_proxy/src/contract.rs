@@ -1,22 +1,11 @@
-use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{owner_store, read_owner_store, read_ref_contract_store, ref_contract_store};
-use crate::struct_types::ReferenceData;
 use cosmwasm_std::{
     entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
     StdResult,
 };
 
-macro_rules! unwrap_query {
-    ( $e:expr, $f:expr ) => {
-        match $e {
-            Ok(x) => match to_binary(&x) {
-                Ok(y) => Ok(y),
-                Err(_) => Err(StdError::generic_err($f)),
-            },
-            Err(e) => return Err(e),
-        }
-    };
-}
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::state::CONFIG;
+use crate::struct_types::{Config, ReferenceData};
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -25,9 +14,11 @@ pub fn instantiate(
     info: MessageInfo,
     msg: InstantiateMsg,
 ) -> StdResult<Response> {
-    owner_store(deps.storage).save(&deps.api.addr_canonicalize(&info.sender.as_str())?)?;
-    ref_contract_store(deps.storage)
-        .save(&deps.api.addr_canonicalize(&msg.initial_ref.as_str())?)?;
+    let config = Config {
+        owner: info.sender,
+        reference_contract: msg.reference_contract,
+    };
+    CONFIG.save(deps.storage, &config)?;
     Ok(Response::default())
 }
 
@@ -39,73 +30,63 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> StdResult<Response> {
     match msg {
-        ExecuteMsg::TransferOwnership { new_owner } => {
-            try_transfer_ownership(deps, info, new_owner)
-        }
-        ExecuteMsg::SetRef { new_ref } => try_set_ref(deps, info, new_ref),
+        ExecuteMsg::UpdateConfig {
+            new_owner,
+            new_reference_contract,
+        } => execute_update_config(deps, info, new_owner, new_reference_contract),
     }
 }
 
-pub fn try_transfer_ownership(
+pub fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,
-    new_owner: Addr,
+    new_owner: Option<Addr>,
+    new_reference_contract: Option<Addr>,
 ) -> StdResult<Response> {
-    let owner_addr = read_owner_store(deps.storage).load()?;
-    if deps.api.addr_canonicalize(&info.sender.as_str())? != owner_addr {
+    let mut config = CONFIG.load(deps.storage)?;
+    if info.sender != config.owner {
         return Err(StdError::generic_err("NOT_AUTHORIZED"));
     }
 
-    owner_store(deps.storage).save(&deps.api.addr_canonicalize(&new_owner.as_str())?)?;
+    match new_owner {
+        Some(addr) => config.owner = addr,
+        None => (),
+    };
 
-    Ok(Response::default())
-}
+    match new_reference_contract {
+        Some(addr) => config.reference_contract = addr,
+        None => (),
+    };
 
-pub fn try_set_ref(deps: DepsMut, info: MessageInfo, new_ref: Addr) -> StdResult<Response> {
-    let owner_addr = read_owner_store(deps.storage).load()?;
-    if deps.api.addr_canonicalize(&info.sender.as_str())? != owner_addr {
-        return Err(StdError::generic_err("NOT_AUTHORIZED"));
-    }
+    CONFIG.save(deps.storage, &config)?;
 
-    ref_contract_store(deps.storage).save(&deps.api.addr_canonicalize(&new_ref.as_str())?)?;
-
-    Ok(Response::default())
+    Ok(Response::new().add_attribute("action", "update_config"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::Owner {} => unwrap_query!(query_owner(deps), "SERIALIZE_OWNER_ERROR"),
-        QueryMsg::Ref {} => unwrap_query!(query_ref(deps), "SERIALIZE_REF_DATA_ERROR"),
+        QueryMsg::Config {} => to_binary(&query_config(deps)?),
         QueryMsg::GetReferenceData {
             base_symbol,
             quote_symbol,
-        } => unwrap_query!(
-            query_reference_data(deps, base_symbol, quote_symbol),
-            "SERIALIZE_REFERENCE_DATA_ERROR"
-        ),
+        } => to_binary(&query_reference_data(deps, base_symbol, quote_symbol)?),
         QueryMsg::GetReferenceDataBulk {
             base_symbols,
             quote_symbols,
-        } => unwrap_query!(
-            query_reference_data_bulk(deps, base_symbols, quote_symbols,),
-            "SERIALIZE_REFERENCE_DATA_BULK_ERROR"
-        ),
+        } => to_binary(&query_reference_data_bulk(
+            deps,
+            base_symbols,
+            quote_symbols,
+        )?),
     }
 }
 
-fn query_owner(deps: Deps) -> StdResult<Addr> {
-    read_owner_store(deps.storage)
-        .load()
-        .map(|ca| deps.api.addr_humanize(&ca).unwrap())
-        .map_err(|_| StdError::generic_err("OWNER_NOT_INITIALIZED"))
-}
-
-fn query_ref(deps: Deps) -> StdResult<Addr> {
-    read_ref_contract_store(deps.storage)
-        .load()
-        .map(|ca| deps.api.addr_humanize(&ca).unwrap())
-        .map_err(|_| StdError::generic_err("REF_NOT_INITIALIZED"))
+fn query_config(deps: Deps) -> StdResult<Config> {
+    match CONFIG.may_load(deps.storage)? {
+        Some(config) => Ok(config),
+        None => Err(StdError::generic_err("CONFIG_NOT_INITIALIZED")),
+    }
 }
 
 fn query_reference_data(
@@ -114,7 +95,7 @@ fn query_reference_data(
     quote_symbol: String,
 ) -> StdResult<ReferenceData> {
     deps.querier.query_wasm_smart(
-        &query_ref(deps)?,
+        &query_config(deps)?.reference_contract,
         &QueryMsg::GetReferenceData {
             base_symbol,
             quote_symbol,
@@ -128,7 +109,7 @@ fn query_reference_data_bulk(
     quote_symbols: Vec<String>,
 ) -> StdResult<Vec<ReferenceData>> {
     deps.querier.query_wasm_smart(
-        &query_ref(deps)?,
+        &query_config(deps)?.reference_contract,
         &QueryMsg::GetReferenceDataBulk {
             base_symbols,
             quote_symbols,
@@ -138,283 +119,117 @@ fn query_reference_data_bulk(
 
 #[cfg(test)]
 mod tests {
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+
     use super::*;
-    use cosmwasm_std::testing::{
-        mock_dependencies, mock_env, mock_info, MockApi, MockQuerier, MockStorage,
-    };
-    use cosmwasm_std::{coins, from_binary, Coin, StdError};
-    use cosmwasm_std::{OwnedDeps, Timestamp};
 
-    fn init_msg(r: &str) -> InstantiateMsg {
-        InstantiateMsg {
-            initial_ref: Addr::unchecked(r),
-        }
-    }
-
-    fn handle_transfer_ownership(o: &str) -> ExecuteMsg {
-        ExecuteMsg::TransferOwnership {
-            new_owner: Addr::unchecked(o),
-        }
-    }
-
-    fn handle_set_ref(r: &str) -> ExecuteMsg {
-        ExecuteMsg::SetRef {
-            new_ref: Addr::unchecked(r),
-        }
-    }
-
-    fn query_owner_msg() -> QueryMsg {
-        QueryMsg::Owner {}
-    }
-
-    fn query_ref_msg() -> QueryMsg {
-        QueryMsg::Ref {}
-    }
-
-    fn get_mocks(
-        sender: &str,
-        sent: &[Coin],
-        height: u64,
-        time: u64,
-    ) -> (
-        OwnedDeps<MockStorage, MockApi, MockQuerier>,
-        Env,
-        MessageInfo,
-    ) {
-        let deps = mock_dependencies();
-
-        let mut env = mock_env();
-        env.block.height = height;
-        env.block.time = Timestamp::from_seconds(time);
-
-        let info = mock_info(sender, sent);
-
-        (deps, env, info)
-    }
-
-    #[test]
-    fn proper_initialization() {
-        let msg = init_msg("test_ref");
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
-
-        // owner not initialized yet
-        match query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap_err() {
-            StdError::GenericErr { msg, .. } => assert_eq!("OWNER_NOT_INITIALIZED", msg),
-            _ => panic!("Test Fail: expect OWNER_NOT_INITIALIZED"),
-        }
-
-        // Check if successfully set owner
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
+    // This function will setup the contract for other tests
+    fn setup(mut deps: DepsMut, sender: &str, contract: &str) {
+        let info = mock_info(sender, &[]);
+        let env = mock_env();
+        let res = instantiate(
+            deps.branch(),
+            env,
+            info,
+            InstantiateMsg {
+                reference_contract: Addr::unchecked(contract),
+            },
+        )
+        .unwrap();
         assert_eq!(0, res.messages.len());
-
-        // Verify correct owner address
-        let encoded_owner = query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap();
         assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&encoded_owner).unwrap()
-        );
-
-        // Verify correct ref address
-        let encoded_ref_addr = query(deps.as_ref(), env.clone(), query_ref_msg()).unwrap();
-        assert_eq!(
-            String::from("test_ref"),
-            from_binary::<Addr>(&encoded_ref_addr).unwrap()
-        );
+            query_config(deps.as_ref()).unwrap(),
+            Config {
+                owner: Addr::unchecked(sender),
+                reference_contract: Addr::unchecked(contract),
+            }
+        )
     }
 
-    #[test]
-    fn test_transfer_ownership_fail_unauthorized() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
+    mod instantiate {
+        use super::*;
 
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                init_msg("test_ref")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap())
-                .unwrap()
-        );
-
-        let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 789, 0);
-
-        // should fail because sender is alice not owner
-        match execute(
-            deps.as_mut(),
-            alice_env.clone(),
-            alice_info.clone(),
-            handle_transfer_ownership("new_owner"),
-        )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("NOT_AUTHORIZED", msg),
-            _ => panic!("Test Fail: expect NOT_AUTHORIZED"),
+        #[test]
+        fn can_instantiate() {
+            let mut deps = mock_dependencies();
+            let init_msg = InstantiateMsg {
+                reference_contract: Addr::unchecked("standard_reference_basic"),
+            };
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let res = instantiate(deps.as_mut(), env, info, init_msg).unwrap();
+            assert_eq!(0, res.messages.len());
+            assert_eq!(
+                query_config(deps.as_ref()).unwrap(),
+                Config {
+                    owner: Addr::unchecked("owner"),
+                    reference_contract: Addr::unchecked("standard_reference_basic"),
+                }
+            );
         }
     }
 
-    #[test]
-    fn test_transfer_ownership_success() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
+    mod config {
+        use crate::msg::ExecuteMsg::UpdateConfig;
 
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                init_msg("test_ref")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
+        use super::*;
 
-        // // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap())
-                .unwrap()
-        );
+        #[test]
+        fn can_update_config_by_owner() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner", "contract");
 
-        // should successfully set new owner
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                handle_transfer_ownership("new_owner")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
+            // Test authorized attempt to update config
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: Option::from(Addr::unchecked("new_owner")),
+                new_reference_contract: Option::from(Addr::unchecked("contract")),
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+            let config = query_config(deps.as_ref()).unwrap();
+            assert_eq!(
+                config,
+                Config {
+                    owner: Addr::unchecked("new_owner"),
+                    reference_contract: Addr::unchecked("contract"),
+                }
+            );
 
-        // check owner in the state should be new_owner
-        assert_eq!(
-            String::from("new_owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap())
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_set_ref_fail_unauthorized() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
-
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                init_msg("test_ref_1")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap())
-                .unwrap()
-        );
-        // check ref in the state
-        assert_eq!(
-            String::from("test_ref_1"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_ref_msg()).unwrap())
-                .unwrap()
-        );
-
-        let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 789, 0);
-
-        // should fail because sender is alice not owner
-        match execute(
-            deps.as_mut(),
-            alice_env.clone(),
-            alice_info.clone(),
-            handle_set_ref("test_ref_1"),
-        )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("NOT_AUTHORIZED", msg),
-            _ => panic!("Test Fail: expect NOT_AUTHORIZED"),
+            // Test attempt to partially update config
+            let info = mock_info("new_owner", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: Option::from(Addr::unchecked("owner")),
+                new_reference_contract: None,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+            let config = query_config(deps.as_ref()).unwrap();
+            assert_eq!(
+                config,
+                Config {
+                    owner: Addr::unchecked("owner"),
+                    reference_contract: Addr::unchecked("contract"),
+                }
+            );
         }
 
-        // check ref in the state
-        assert_eq!(
-            String::from("test_ref_1"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_ref_msg()).unwrap())
-                .unwrap()
-        );
-    }
+        #[test]
+        fn cannot_update_config_by_others() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner", "contract");
 
-    #[test]
-    fn test_set_ref_success() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
-
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                init_msg("test_ref_1")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_owner_msg()).unwrap())
-                .unwrap()
-        );
-
-        // check ref in the state
-        assert_eq!(
-            String::from("test_ref_1"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_ref_msg()).unwrap())
-                .unwrap()
-        );
-
-        // should successfully set new owner
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                handle_set_ref("test_ref_2")
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check owner in the state should be new_owner
-        assert_eq!(
-            String::from("test_ref_2"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_ref_msg()).unwrap())
-                .unwrap()
-        );
+            // Test unauthorized attempt to update config
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: Option::from(Addr::unchecked("user")),
+                new_reference_contract: None,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_AUTHORIZED"));
+        }
     }
 }

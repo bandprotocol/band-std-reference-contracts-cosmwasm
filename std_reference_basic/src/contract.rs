@@ -113,7 +113,7 @@ pub fn execute_relay(
     }
 
     if !(rates.len() == symbols.len()) {
-        return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
+        return Err(StdError::generic_err("MISMATCHED_INPUT_SIZES"));
     }
 
     for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
@@ -188,9 +188,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
-fn query_config(deps: Deps) -> StdResult<Addr> {
+fn query_config(deps: Deps) -> StdResult<Config> {
     match CONFIG.may_load(deps.storage)? {
-        Some(config) => Ok(config.owner),
+        Some(config) => Ok(config),
         None => Err(StdError::generic_err("CONFIG_NOT_INITIALIZED")),
     }
 }
@@ -221,16 +221,29 @@ fn query_reference_data(
     base_symbol: String,
     quote_symbol: String,
 ) -> StdResult<ReferenceData> {
-    let base: RefData = query_ref(deps, base_symbol)?;
-    let quote: RefData = query_ref(deps, quote_symbol)?;
-    let base_rate: u128 = base.rate.into();
-    let quote_rate: u128 = quote.rate.into();
+    let mut ref_datas: Vec<RefData> = vec![];
+    let mut dne_symbols: Vec<String> = vec![];
 
-    Ok(ReferenceData::new(
-        Uint128::new((base_rate * E9 * E9) / quote_rate),
-        base.resolve_time,
-        quote.resolve_time,
-    ))
+    for sym in vec![base_symbol, quote_symbol] {
+        match query_ref(deps, sym.clone()) {
+            Ok(r) => ref_datas.push(r),
+            Err(_r) => dne_symbols.push(sym),
+        }
+    }
+
+    if dne_symbols.len() != 0 {
+        let err_msg = dne_symbols.join("_");
+        Err(StdError::generic_err(format!(
+            "REFERENCE_DATA_NOT_AVAILABLE_FOR_{}",
+            err_msg
+        )))
+    } else {
+        Ok(ReferenceData::new(
+            ref_datas[0].rate * Uint128::new(E9 * E9) / ref_datas[1].rate,
+            ref_datas[0].resolve_time,
+            ref_datas[1].resolve_time,
+        ))
+    }
 }
 
 fn query_reference_data_bulk(
@@ -242,908 +255,691 @@ fn query_reference_data_bulk(
         return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
     }
 
-    base_symbols
-        .iter()
-        .zip(quote_symbols.iter())
-        .map(|(b, q)| query_reference_data(deps, b.clone(), q.clone()))
-        .collect()
+    let mut ref_datas: Vec<ReferenceData> = vec![];
+    let mut dne_symbols: Vec<String> = vec![];
+
+    for (b, q) in base_symbols.iter().zip(quote_symbols.iter()) {
+        match query_reference_data(deps, b.to_owned(), q.to_owned()) {
+            Ok(r) => ref_datas.push(r),
+            Err(r) => dne_symbols.extend(r.to_string()[48..].split("_").map(|s| s.to_string())),
+        }
+    }
+
+    if dne_symbols.len() != 0 {
+        dne_symbols.sort();
+        dne_symbols.dedup();
+        let err_msg = dne_symbols.join("_");
+        Err(StdError::generic_err(format!(
+            "REFERENCE_DATA_NOT_AVAILABLE_FOR_{}",
+            err_msg
+        )))
+    } else {
+        Ok(ref_datas)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use cosmwasm_std::testing::{
-        mock_dependencies, mock_env, mock_info, MockApi, MockQuerier, MockStorage,
-    };
-    use cosmwasm_std::{coins, from_binary, Coin, OwnedDeps, StdError, Timestamp};
+    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
+    use cosmwasm_std::Addr;
+
+    use crate::msg::ExecuteMsg::{AddRelayers, Relay};
 
     use super::*;
 
-    fn init_msg() -> InstantiateMsg {
-        InstantiateMsg {}
+    // This function will setup the contract for other tests
+    fn setup(mut deps: DepsMut, sender: &str) {
+        let info = mock_info(sender, &[]);
+        let env = mock_env();
+        let res = instantiate(deps.branch(), env, info, InstantiateMsg {}).unwrap();
+        assert_eq!(0, res.messages.len());
+        assert_eq!(
+            query_config(deps.as_ref()).unwrap(),
+            Config {
+                owner: Addr::unchecked(sender)
+            }
+        )
     }
 
-    fn execute_transfer_ownership(o: &str) -> ExecuteMsg {
-        ExecuteMsg::UpdateConfig {
-            new_owner: Addr::unchecked(String::from(o)),
-        }
-    }
+    // This function will setup the relayer for other tests
+    fn setup_relayers(mut deps: DepsMut, sender: &str, relayers: Vec<Addr>) {
+        setup(deps.branch(), sender);
 
-    fn execute_add_relayer(rs: Vec<&str>) -> ExecuteMsg {
-        ExecuteMsg::AddRelayers {
-            relayers: rs
+        let info = mock_info(sender, &[]);
+        let env = mock_env();
+        let msg = AddRelayers {
+            relayers: relayers
+                .clone()
                 .into_iter()
-                .map(|r| Addr::unchecked(String::from(r)))
-                .collect(),
-        }
+                .map(|r| Addr::unchecked(r))
+                .collect::<Vec<Addr>>(),
+        };
+        execute(deps.branch(), env, info, msg).unwrap();
+
+        // Check if relayer is successfully added
+        let is_relayers = relayers
+            .into_iter()
+            .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
+            .collect::<Vec<bool>>();
+
+        assert_eq!(
+            is_relayers,
+            std::iter::repeat(true)
+                .take(is_relayers.len())
+                .collect::<Vec<bool>>()
+        );
     }
 
-    fn execute_remove_relayer(rs: Vec<&str>) -> ExecuteMsg {
-        ExecuteMsg::RemoveRelayers {
-            relayers: rs
-                .into_iter()
-                .map(|r| Addr::unchecked(String::from(r)))
-                .collect(),
-        }
-    }
-
-    fn execute_relay(
-        symbols: Vec<String>,
-        rates: Vec<Uint128>,
-        resolve_time: u64,
-        request_id: u64,
-    ) -> ExecuteMsg {
-        ExecuteMsg::Relay {
-            symbols,
-            rates,
-            resolve_time,
-            request_id,
-        }
-    }
-
-    fn execute_force_relay(
-        symbols: Vec<String>,
-        rates: Vec<Uint128>,
-        resolve_time: u64,
-        request_id: u64,
-    ) -> ExecuteMsg {
-        ExecuteMsg::ForceRelay {
-            symbols,
-            rates,
-            resolve_time,
-            request_id,
-        }
-    }
-
-    fn query_config_msg() -> QueryMsg {
-        QueryMsg::Config {}
-    }
-
-    fn query_is_relayer_msg(r: &str) -> QueryMsg {
-        QueryMsg::IsRelayer {
-            relayer: Addr::unchecked(String::from(r)),
-        }
-    }
-
-    fn query_ref_data_msg(symbol: String) -> QueryMsg {
-        QueryMsg::GetRef { symbol }
-    }
-
-    fn query_reference_data_msg(base_symbol: String, quote_symbol: String) -> QueryMsg {
-        QueryMsg::GetReferenceData {
-            base_symbol,
-            quote_symbol,
-        }
-    }
-
-    fn query_reference_data_bulk_msg(
-        base_symbols: Vec<String>,
-        quote_symbols: Vec<String>,
-    ) -> QueryMsg {
-        QueryMsg::GetReferenceDataBulk {
-            base_symbols,
-            quote_symbols,
-        }
-    }
-
-    fn get_mocks(
+    // This function will setup mock relays for other tests
+    fn setup_relays(
+        mut deps: DepsMut,
         sender: &str,
-        sent: &[Coin],
-        height: u64,
-        time: u64,
-    ) -> (
-        OwnedDeps<MockStorage, MockApi, MockQuerier>,
-        Env,
-        MessageInfo,
+        relayers: Vec<Addr>,
+        symbols: Vec<String>,
+        rates: Vec<Uint128>,
+        resolve_time: u64,
+        request_id: u64,
     ) {
-        let deps = mock_dependencies();
+        setup_relayers(deps.branch(), sender, relayers.clone());
 
-        let mut env = mock_env();
-        env.block.height = height;
-        env.block.time = Timestamp::from_seconds(time);
+        let info = mock_info(relayers[0].as_str(), &[]);
+        let env = mock_env();
 
-        let info = mock_info(sender, sent);
+        let msg = Relay {
+            symbols: symbols.clone(),
+            rates: rates.clone(),
+            resolve_time,
+            request_id,
+        };
+        execute(deps.branch(), env, info, msg).unwrap();
 
-        (deps, env, info)
-    }
-
-    #[test]
-    fn proper_initialization() {
-        let msg = init_msg();
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
-
-        // owner not initialized yet
-        match query(deps.as_ref(), env.clone(), query_config_msg()).unwrap_err() {
-            StdError::GenericErr { msg, .. } => assert_eq!("CONFIG_NOT_INITIALIZED", msg),
-            _ => panic!("Test Fail: expect CONFIG_NOT_INITIALIZED"),
-        }
-
-        // Check if successfully set owner
-        let res = instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // should be able to query
-        let encoded_owner = query(deps.as_ref(), env.clone(), query_config_msg()).unwrap();
-        // Verify correct owner address
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&encoded_owner).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_transfer_ownership_fail_unauthorized() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
-
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(deps.as_mut(), env.clone(), info, init_msg())
-                .unwrap()
-                .messages
-                .len()
-        );
-
-        // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
-                .unwrap()
-        );
-
-        let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 789, 0);
-
-        // should fail because sender is alice not owner
-        match execute(
-            deps.as_mut(),
-            alice_env,
-            alice_info,
-            execute_transfer_ownership("new_owner"),
+        let reference_datas = query_reference_data_bulk(
+            deps.as_ref(),
+            symbols.clone(),
+            std::iter::repeat("USD".to_string())
+                .take(*&symbols.len())
+                .collect::<Vec<String>>(),
         )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("NOT_AUTHORIZED", msg),
-            _ => panic!("Test Fail: expect NOT_AUTHORIZED"),
-        }
+        .unwrap();
+
+        let retrieved_rates = reference_datas
+            .into_iter()
+            .map(|rd| rd.rate / Uint128::new(E9))
+            .collect::<Vec<Uint128>>();
+
+        assert_eq!(retrieved_rates, rates);
     }
 
-    #[test]
-    fn test_transfer_ownership_success() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 789, 0);
+    mod instantiate {
+        use super::*;
 
-        // should successfully instantiate owner
-        assert_eq!(
-            0,
-            instantiate(deps.as_mut(), env.clone(), info.clone(), init_msg())
-                .unwrap()
-                .messages
-                .len()
-        );
-
-        // // check owner in the state
-        assert_eq!(
-            String::from("owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
-                .unwrap()
-        );
-
-        // should successfully set new owner
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_transfer_ownership("new_owner"),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check owner in the state should be new_owner
-        assert_eq!(
-            String::from("new_owner"),
-            from_binary::<Addr>(&query(deps.as_ref(), env.clone(), query_config_msg()).unwrap())
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_add_remove_relayer_fail_not_authorized() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 9999);
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), init_msg()).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 876, 0);
-
-        // NOT_AUTHORIZED, sender should be owner not alice
-        match execute(
-            deps.as_mut(),
-            alice_env,
-            alice_info,
-            execute_add_relayer(vec!["r1", "r2", "r3"]),
-        )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("NOT_AUTHORIZED", msg),
-            _ => panic!("Test Fail: expect NOT_AUTHORIZED"),
-        }
-    }
-
-    #[test]
-    fn test_add_remove_relayer() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 9999);
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), init_msg()).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        let test_relayers = vec!["r1", "r2", "r3"];
-
-        // Check that all "r" is not a relayer yet
-        for r in test_relayers.clone() {
+        #[test]
+        fn can_instantiate() {
+            let mut deps = mock_dependencies();
+            let init_msg = InstantiateMsg {};
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let res = instantiate(deps.as_mut(), env, info, init_msg).unwrap();
+            assert_eq!(0, res.messages.len());
             assert_eq!(
-                false,
-                from_binary::<bool>(
-                    &query(deps.as_ref(), env.clone(), query_is_relayer_msg(r)).unwrap()
-                )
-                .unwrap()
-            );
-        }
-
-        // should successfully add all "r"
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(test_relayers.clone()),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that all "r" is now a relayer
-        for r in test_relayers.clone() {
-            assert_eq!(
-                true,
-                from_binary::<bool>(
-                    &query(deps.as_ref(), env.clone(), query_is_relayer_msg(r)).unwrap()
-                )
-                .unwrap()
-            );
-        }
-
-        // should successfully remove all "r"
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_remove_relayer(test_relayers.clone()),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that all "r" is removed
-        for r in test_relayers.clone() {
-            assert_eq!(
-                false,
-                from_binary::<bool>(
-                    &query(deps.as_ref(), env.clone(), query_is_relayer_msg(r)).unwrap()
-                )
-                .unwrap()
+                query_config(deps.as_ref()).unwrap(),
+                Config {
+                    owner: Addr::unchecked("owner")
+                }
             );
         }
     }
 
-    #[test]
-    fn test_query_usd() {
-        let (deps, env, _info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 9999);
+    mod config {
+        use crate::msg::ExecuteMsg::UpdateConfig;
 
-        assert_eq!(
-            RefData::new(Uint128::from(1 * E9), u64::MAX, 0),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("USD".into())).unwrap()
-            )
-            .unwrap()
-        );
+        use super::*;
+
+        #[test]
+        fn can_update_config_by_owner() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner");
+
+            // Test authorized attempt to update config
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: Addr::unchecked("new_owner"),
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+            let config = query_config(deps.as_ref()).unwrap();
+            assert_eq!(
+                config,
+                Config {
+                    owner: Addr::unchecked("new_owner"),
+                },
+                "Expected successful owner change"
+            );
+        }
+
+        #[test]
+        fn cannot_update_config_by_others() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner");
+
+            // Test unauthorized attempt to update config
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: Addr::unchecked("user"),
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_AUTHORIZED"));
+        }
     }
 
-    #[test]
-    fn test_handle_relay_fail_not_a_relayer() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 0);
-        let msg = init_msg();
+    mod relay {
+        use crate::msg::ExecuteMsg::{AddRelayers, ForceRelay, Relay, RemoveRelayers};
 
-        let res = instantiate(deps.as_mut(), env, info, msg).unwrap();
-        assert_eq!(0, res.messages.len());
+        use super::*;
 
-        let (_, alice_env, alice_info) = get_mocks("alice", &coins(1000, "test_coin"), 876, 0);
+        //
+        // #[test]
+        // fn add_relayer_by_owner() {
+        //     // Setup
+        //     let mut deps = mock_dependencies();
+        //     let init_msg = InstantiateMsg {};
+        //     let info = mock_info("owner", &[]);
+        //     let env = mock_env();
+        //     instantiate(deps.as_mut(), env.clone(), info, init_msg).unwrap();
+        //
+        //     // Test authorized attempt to add relayer
+        //     let info = mock_info("owner", &[]);
+        //     let env = mock_env();
+        //     let msg = AddRelayers {
+        //         relayers: vec![Addr::unchecked("relayer_1")],
+        //     };
+        //     execute(deps.as_mut(), env, info, msg).unwrap();
+        //
+        //     // Check if relayer is successfully added
+        //     let is_relayer = query_is_relayer(deps.as_ref(), Addr::unchecked("relayer_1")).unwrap();
+        //     assert_eq!(is_relayer, true);
+        // }
 
-        // NOT_A_RELAYER, sender should be a relayer
-        match execute(
-            deps.as_mut(),
-            alice_env,
-            alice_info,
-            execute_relay(
-                vec!["A".into(), "B".into(), "C".into()],
-                vec![
-                    Uint128::from(1 * E9),
-                    Uint128::from(2 * E9),
-                    Uint128::from(3 * E9),
-                ],
+        #[test]
+        fn add_relayers_by_owner() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let init_msg = InstantiateMsg {};
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            instantiate(deps.as_mut(), env.clone(), info, init_msg).unwrap();
+            let relayers_to_add = vec!["relayer_1", "relayer_2", "relayer_3"];
+
+            // Test authorized attempt to add relayers
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let msg = AddRelayers {
+                relayers: relayers_to_add
+                    .clone()
+                    .into_iter()
+                    .map(|r| Addr::unchecked(r))
+                    .collect::<Vec<Addr>>(),
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Check if relayer is successfully added
+            let is_relayers = relayers_to_add
+                .into_iter()
+                .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
+                .collect::<Vec<bool>>();
+            assert_eq!(is_relayers, [true, true, true]);
+        }
+
+        #[test]
+        fn add_relayers_by_other() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let init_msg = InstantiateMsg {};
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            instantiate(deps.as_mut(), env.clone(), info, init_msg).unwrap();
+
+            // Test unauthorized attempt to add relayer
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let msg = AddRelayers {
+                relayers: vec![Addr::unchecked("relayer_1")],
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_AUTHORIZED"));
+        }
+
+        #[test]
+        fn remove_relayer_by_owner() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayers_list = vec!["relayer_1", "relayer_2", "relayer_3"]
+                .into_iter()
+                .map(|r| Addr::unchecked(r))
+                .collect::<Vec<Addr>>();
+            setup_relayers(deps.as_mut(), "owner", relayers_list.clone());
+
+            // Remove relayer
+            let relayers_to_remove = relayers_list[..2].to_vec();
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let msg = RemoveRelayers {
+                relayers: relayers_to_remove,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Check if relayers were successfully removed
+            let is_relayers = relayers_list
+                .into_iter()
+                .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
+                .collect::<Vec<bool>>();
+            assert_eq!(is_relayers, [false, false, true]);
+        }
+
+        #[test]
+        fn remove_relayer_by_other() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayers = vec![Addr::unchecked("relayer_1")];
+            setup_relayers(deps.as_mut(), "owner", relayers.clone());
+
+            // Test unauthorized attempt to remove relayer
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let msg = RemoveRelayers { relayers: relayers };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_AUTHORIZED"));
+        }
+
+        #[test]
+        fn attempt_relay_by_relayer() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Test authorized attempt to relay data
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 100,
+                request_id: 1,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Check if relay was successful
+            let reference_datas = query_reference_data_bulk(
+                deps.as_ref(),
+                symbols.clone(),
+                std::iter::repeat("USD".to_string())
+                    .take(*&symbols.len())
+                    .collect::<Vec<String>>(),
+            )
+            .unwrap();
+            let retrieved_rates = reference_datas
+                .into_iter()
+                .map(|rd| rd.rate / Uint128::new(E9))
+                .collect::<Vec<Uint128>>();
+            assert_eq!(retrieved_rates, rates);
+
+            // Test attempt to relay with invalid resolve times
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let old_rates = [1, 2, 3]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: old_rates,
+                resolve_time: 100,
+                request_id: 1,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("INVALID_RESOLVE_TIME"));
+
+            // Test attempt to relay with mismatch input sizes
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let mismatched_rates = vec![Uint128::new(1)];
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: mismatched_rates,
+                resolve_time: 100,
+                request_id: 1,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("MISMATCHED_INPUT_SIZES"))
+        }
+
+        #[test]
+        fn attempt_relay_by_others() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner");
+
+            // Test unauthorized attempt to relay data
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 0,
+                request_id: 0,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_A_RELAYER"));
+        }
+
+        #[test]
+        fn attempt_force_relay_by_relayer() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Test authorized attempt to relay data
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = ForceRelay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 100,
+                request_id: 2,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Test attempt to force relay
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let forced_rates = [1, 2, 3]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = ForceRelay {
+                symbols: symbols.clone(),
+                rates: forced_rates.clone(),
+                resolve_time: 90,
+                request_id: 1,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Check if forced relay was successful
+            let reference_datas = query_reference_data_bulk(
+                deps.as_ref(),
+                symbols.clone(),
+                std::iter::repeat("USD".to_string())
+                    .take(*&symbols.len())
+                    .collect::<Vec<String>>(),
+            )
+            .unwrap();
+            let retrieved_rates = reference_datas
+                .into_iter()
+                .map(|rd| rd.rate / Uint128::new(E9))
+                .collect::<Vec<Uint128>>();
+            assert_eq!(retrieved_rates, forced_rates);
+        }
+
+        #[test]
+        fn attempt_force_relay_by_other() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner");
+
+            // Test unauthorized attempt to relay data
+            let info = mock_info("user", &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = ForceRelay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 0,
+                request_id: 0,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("NOT_A_RELAYER"));
+        }
+    }
+
+    mod query {
+        use cosmwasm_std::from_binary;
+
+        use crate::msg::QueryMsg::{GetRef, GetReferenceData, GetReferenceDataBulk};
+
+        use super::*;
+
+        #[test]
+        fn attempt_query_config() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner");
+
+            // Test if query_config results are correct
+            assert_eq!(
+                query_config(deps.as_ref()).unwrap(),
+                Config {
+                    owner: Addr::unchecked("owner")
+                }
+            );
+        }
+
+        #[test]
+        fn attempt_query_is_relayer() {
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Test if is_relayers results are correct
+            assert_eq!(query_is_relayer(deps.as_ref(), relayer).unwrap(), true);
+            assert_eq!(
+                query_is_relayer(deps.as_ref(), Addr::unchecked("not_a_relayer")).unwrap(),
+                false
+            );
+        }
+
+        #[test]
+        fn attempt_query_get_ref() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            let symbol = vec!["AAA".to_string()];
+            let rate = vec![Uint128::new(1000)];
+            setup_relays(
+                deps.as_mut(),
+                "owner",
+                vec![relayer.clone()],
+                symbol.clone(),
+                rate.clone(),
                 100,
                 1,
-            ),
-        )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("NOT_A_RELAYER", msg),
-            _ => panic!("Test Fail: expect NOT_A_RELAYER"),
+            );
+
+            // Test if get_ref results are correct
+            let env = mock_env();
+            let msg = GetRef {
+                symbol: symbol[0].to_owned(),
+            };
+            let binary_res = query(deps.as_ref(), env, msg).unwrap();
+            assert_eq!(
+                from_binary::<RefData>(&binary_res).unwrap(),
+                RefData::new(rate[0], 100, 1)
+            );
+
+            // Test invalid symbol
+            let env = mock_env();
+            let msg = GetRef {
+                symbol: "DNE".to_string(),
+            };
+            let err = query(deps.as_ref(), env, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("REF_DATA_NOT_AVAILABLE_FOR_DNE"));
         }
-    }
 
-    #[test]
-    fn test_handle_relay_success() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 0);
-        let msg = init_msg();
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // Check that the owner is not a relayer yet
-        assert_eq!(
-            false,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully add relayer
-        assert_eq!(
-            0,
-            execute(
+        #[test]
+        fn attempt_query_get_reference_data() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            let symbol = vec!["AAA".to_string()];
+            let rate = vec![Uint128::new(1000)];
+            setup_relays(
                 deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(vec!["owner"]),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that the owner is now a relayer
-        assert_eq!(
-            true,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(1 * E9),
-                        Uint128::from(2 * E9),
-                        Uint128::from(3 * E9),
-                    ],
-                    100,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check ref data is correct
-        assert_eq!(
-            RefData::new(Uint128::from(1 * E9), 100, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("A".into())).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(4 * E9),
-                        Uint128::from(5 * E9),
-                        Uint128::from(6 * E9),
-                    ],
-                    110,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check ref data is correct
-        assert_eq!(
-            RefData::new(Uint128::from(4 * E9), 110, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("A".into())).unwrap()
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_handle_relay_less_resolve_time() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 0);
-        let msg = init_msg();
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // Check that the owner is not a relayer yet
-        assert_eq!(
-            false,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully add relayer
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(vec!["owner"]),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that the owner is now a relayer
-        assert_eq!(
-            true,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay first time
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into()],
-                    vec![Uint128::from(1 * E9), Uint128::from(2 * E9)],
-                    100,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // should not relay second time
-        // assert_eq!(
-        //     0,
-        //     execute(
-        //         deps.as_mut(),
-        //         env.clone(),
-        //         info.clone(),
-        //         execute_relay(
-        //             vec!["A".into(), "B".into(), "C".into()],
-        //             vec![
-        //                 Uint128::from(4 * E9),
-        //                 Uint128::from(5 * E9),
-        //                 Uint128::from(6 * E9),
-        //             ],
-        //             90,
-        //             1,
-        //         ),
-        //     )
-        //     .unwrap()
-        //     .messages
-        //     .len()
-        // );
-        match execute(
-            deps.as_mut(),
-            env.clone(),
-            info.clone(),
-            execute_relay(
-                vec!["A".into(), "B".into(), "C".into()],
-                vec![
-                    Uint128::from(4 * E9),
-                    Uint128::from(5 * E9),
-                    Uint128::from(6 * E9),
-                ],
-                90,
+                "owner",
+                vec![relayer.clone()],
+                symbol.clone(),
+                rate.clone(),
+                100,
                 1,
-            ),
-        )
-        .unwrap_err()
-        {
-            StdError::GenericErr { msg, .. } => assert_eq!("INVALID_RESOLVE_TIME", msg),
-            _ => panic!("Test Fail: expect INVALID_RESOLVE_TIME"),
+            );
+
+            // Test if get_reference_data results are correct
+            let env = mock_env();
+            let msg = GetReferenceData {
+                base_symbol: symbol[0].to_owned(),
+                quote_symbol: "USD".to_string(),
+            };
+            let binary_res = query(deps.as_ref(), env, msg).unwrap();
+            assert_eq!(
+                from_binary::<ReferenceData>(&binary_res).unwrap(),
+                ReferenceData::new(rate[0] * Uint128::new(E9), 100, u64::MAX)
+            );
+
+            // Test invalid symbol
+            let env = mock_env();
+            let msg = GetReferenceData {
+                base_symbol: "DNE".to_string(),
+                quote_symbol: "USD".to_string(),
+            };
+            let err = query(deps.as_ref(), env, msg).unwrap_err();
+            assert_eq!(
+                err,
+                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE")
+            );
+            // Test invalid symbols
+            let env = mock_env();
+            let msg = GetReferenceData {
+                base_symbol: "DNE1".to_string(),
+                quote_symbol: "DNE2".to_string(),
+            };
+            let err = query(deps.as_ref(), env, msg).unwrap_err();
+            assert_eq!(
+                err,
+                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+            );
         }
 
-        // check ref data is correct. A should be data from the first time.
-        assert_eq!(
-            RefData::new(Uint128::from(1 * E9), 100, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("A".into())).unwrap()
-            )
-            .unwrap()
-        );
+        #[test]
+        fn attempt_query_get_reference_data_bulk() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            setup_relays(
+                deps.as_mut(),
+                "owner",
+                vec![relayer.clone()],
+                symbols.clone(),
+                rates.clone(),
+                100,
+                1,
+            );
 
-        // check ref data is correct. B should be data from the first time.
-        assert_eq!(
-            RefData::new(Uint128::from(2 * E9), 100, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("B".into())).unwrap()
-            )
-            .unwrap()
-        );
+            // Test if get_reference_data results are correct
+            let env = mock_env();
+            let msg = GetReferenceDataBulk {
+                base_symbols: symbols.clone(),
+                quote_symbols: std::iter::repeat("USD")
+                    .take(symbols.len())
+                    .map(|q| q.to_string())
+                    .collect::<Vec<String>>(),
+            };
+            let binary_res = query(deps.as_ref(), env, msg).unwrap();
+            let expected_res = rates
+                .iter()
+                .map(|r| ReferenceData::new(r * Uint128::new(E9), 100, u64::MAX))
+                .collect::<Vec<ReferenceData>>();
+            assert_eq!(
+                from_binary::<Vec<ReferenceData>>(&binary_res).unwrap(),
+                expected_res
+            );
 
-        // check ref data is correct. C should not be available
+            // Test invalid symbols
+            let env = mock_env();
+            let msg = GetReferenceDataBulk {
+                base_symbols: vec!["AAA", "DNE1", "DNE2"]
+                    .into_iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<String>>(),
+                quote_symbols: std::iter::repeat("USD")
+                    .take(3)
+                    .map(|q| q.to_string())
+                    .collect::<Vec<String>>(),
+            };
+            let err = query(deps.as_ref(), env, msg).unwrap_err();
+            assert_eq!(
+                err,
+                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+            );
 
-        match query(deps.as_ref(), env.clone(), query_ref_data_msg("C".into())).unwrap_err() {
-            StdError::GenericErr { msg, .. } => assert_eq!("REF_DATA_NOT_AVAILABLE_FOR_C", msg),
-            _ => panic!("Test Fail: expect REF_DATA_NOT_AVAILABLE_FOR_C"),
+            // Test invalid symbols
+            let env = mock_env();
+            let msg = GetReferenceDataBulk {
+                base_symbols: vec!["AAA", "DNE2", "BBB"]
+                    .into_iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<String>>(),
+                quote_symbols: vec!["DNE1", "DNE2", "DNE1"]
+                    .into_iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<String>>(),
+            };
+            let err = query(deps.as_ref(), env, msg).unwrap_err();
+            assert_eq!(
+                err,
+                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+            );
         }
-
-        // match query_ref_data_msg("C".into()).unwrap() {
-        //     StdError::GenericErr { msg, .. } => assert_eq!("REF_DATA_NOT_AVAILABLE_FOR_C", msg),
-        //     _ => panic!("Test Fail: expect REF_DATA_NOT_AVAILABLE_FOR_C"),
-        // }
-    }
-
-    #[test]
-    fn test_handle_force_relay_success() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 0);
-        let msg = init_msg();
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // Check that the owner is not a relayer yet
-        assert_eq!(
-            false,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully add relayer
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(vec!["owner"]),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that the owner is now a relayer
-        assert_eq!(
-            true,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into()],
-                    vec![Uint128::from(1 * E9), Uint128::from(2 * E9)],
-                    100,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // should successfully force relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_force_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(4 * E9),
-                        Uint128::from(5 * E9),
-                        Uint128::from(6 * E9),
-                    ],
-                    90,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check ref data is correct. A should be data from force relay.
-        assert_eq!(
-            RefData::new(Uint128::from(4 * E9), 90, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("A".into())).unwrap()
-            )
-            .unwrap()
-        );
-
-        // check ref data is correct. B should be data from force relay.
-        assert_eq!(
-            RefData::new(Uint128::from(5 * E9), 90, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("B".into())).unwrap()
-            )
-            .unwrap()
-        );
-
-        // check ref data is correct. C should be data from force relay.
-        assert_eq!(
-            RefData::new(Uint128::from(6 * E9), 90, 1),
-            from_binary::<RefData>(
-                &query(deps.as_ref(), env.clone(), query_ref_data_msg("C".into())).unwrap()
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_handle_relay_and_query_reference_data() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 1234);
-        let msg = init_msg();
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // Check that the owner is not a relayer yet
-        assert_eq!(
-            false,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully add relayer
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(vec!["owner"]),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that the owner is now a relayer
-        assert_eq!(
-            true,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(1 * E9),
-                        Uint128::from(2 * E9),
-                        Uint128::from(3 * E9),
-                    ],
-                    100,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check 1
-        assert_eq!(
-            ReferenceData::new(Uint128::from(E9 * E9 / 2), 100, 100),
-            from_binary::<ReferenceData>(
-                &query(
-                    deps.as_ref(),
-                    env.clone(),
-                    query_reference_data_msg("A".into(), "B".into()),
-                )
-                .unwrap()
-            )
-            .unwrap()
-        );
-
-        // check 2
-        assert_eq!(
-            ReferenceData::new(Uint128::from(E9 * E9 / 3), 100, 100),
-            from_binary::<ReferenceData>(
-                &query(
-                    deps.as_ref(),
-                    env.clone(),
-                    query_reference_data_msg("A".into(), "C".into()),
-                )
-                .unwrap()
-            )
-            .unwrap()
-        );
-
-        // check 3
-        assert_eq!(
-            ReferenceData::new(Uint128::from(1 * E9 * E9), 100, u64::MAX),
-            from_binary::<ReferenceData>(
-                &query(
-                    deps.as_ref(),
-                    env.clone(),
-                    query_reference_data_msg("A".into(), "USD".into()),
-                )
-                .unwrap()
-            )
-            .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_handle_relay_and_query_reference_data_bulk() {
-        let (mut deps, env, info) = get_mocks("owner", &coins(1000, "test_coin"), 876, 1234);
-        let msg = init_msg();
-
-        let res = instantiate(deps.as_mut(), env.clone(), info.clone(), msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // Check that the owner is not a relayer yet
-        assert_eq!(
-            false,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully add relayer
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_add_relayer(vec!["owner"]),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // Check that the owner is now a relayer
-        assert_eq!(
-            true,
-            from_binary::<bool>(
-                &query(deps.as_ref(), env.clone(), query_is_relayer_msg("owner")).unwrap()
-            )
-            .unwrap()
-        );
-
-        // should successfully relay
-        assert_eq!(
-            0,
-            execute(
-                deps.as_mut(),
-                env.clone(),
-                info.clone(),
-                execute_relay(
-                    vec!["A".into(), "B".into(), "C".into()],
-                    vec![
-                        Uint128::from(1 * E9),
-                        Uint128::from(2 * E9),
-                        Uint128::from(3 * E9),
-                    ],
-                    100,
-                    1,
-                ),
-            )
-            .unwrap()
-            .messages
-            .len()
-        );
-
-        // check 1
-        assert_eq!(
-            vec![
-                ReferenceData::new(Uint128::from(E9 * E9 / 3), 100, 100),
-                ReferenceData::new(Uint128::from(2 * E9 * E9), 100, u64::MAX),
-                ReferenceData::new(Uint128::from(3 * E9 * E9 / 2), 100, 100),
-            ],
-            from_binary::<Vec<ReferenceData>>(
-                &query(
-                    deps.as_ref(),
-                    env.clone(),
-                    query_reference_data_bulk_msg(
-                        vec!["A".into(), "B".into(), "C".into()],
-                        vec!["C".into(), "USD".into(), "B".into()],
-                    ),
-                )
-                .unwrap()
-            )
-            .unwrap()
-        );
     }
 }

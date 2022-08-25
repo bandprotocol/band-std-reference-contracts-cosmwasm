@@ -210,7 +210,7 @@ fn query_ref(deps: Deps, symbol: String) -> StdResult<RefData> {
     match REFDATA.may_load(deps.storage, &symbol)? {
         Some(refdata) => Ok(refdata),
         None => Err(StdError::generic_err(format!(
-            "REF_DATA_NOT_AVAILABLE_FOR_{}",
+            "DATA_NOT_AVAILABLE_FOR_{}",
             symbol
         ))),
     }
@@ -234,7 +234,7 @@ fn query_reference_data(
     if dne_symbols.len() != 0 {
         let err_msg = dne_symbols.join("_");
         Err(StdError::generic_err(format!(
-            "REFERENCE_DATA_NOT_AVAILABLE_FOR_{}",
+            "DATA_NOT_AVAILABLE_FOR_{}",
             err_msg
         )))
     } else {
@@ -261,7 +261,7 @@ fn query_reference_data_bulk(
     for (b, q) in base_symbols.iter().zip(quote_symbols.iter()) {
         match query_reference_data(deps, b.to_owned(), q.to_owned()) {
             Ok(r) => ref_datas.push(r),
-            Err(r) => dne_symbols.extend(r.to_string()[48..].split("_").map(|s| s.to_string())),
+            Err(r) => dne_symbols.extend(r.to_string()[38..].split("_").map(|s| s.to_string())),
         }
     }
 
@@ -270,7 +270,7 @@ fn query_reference_data_bulk(
         dne_symbols.dedup();
         let err_msg = dne_symbols.join("_");
         Err(StdError::generic_err(format!(
-            "REFERENCE_DATA_NOT_AVAILABLE_FOR_{}",
+            "DATA_NOT_AVAILABLE_FOR_{}",
             err_msg
         )))
     } else {
@@ -807,7 +807,7 @@ mod tests {
                 symbol: "DNE".to_string(),
             };
             let err = query(deps.as_ref(), env, msg).unwrap_err();
-            assert_eq!(err, StdError::generic_err("REF_DATA_NOT_AVAILABLE_FOR_DNE"));
+            assert_eq!(err, StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE"));
         }
 
         #[test]
@@ -846,10 +846,7 @@ mod tests {
                 quote_symbol: "USD".to_string(),
             };
             let err = query(deps.as_ref(), env, msg).unwrap_err();
-            assert_eq!(
-                err,
-                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE")
-            );
+            assert_eq!(err, StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE"));
             // Test invalid symbols
             let env = mock_env();
             let msg = GetReferenceData {
@@ -859,7 +856,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
             );
         }
 
@@ -920,7 +917,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
             );
 
             // Test invalid symbols
@@ -938,7 +935,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("REFERENCE_DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
             );
         }
     }

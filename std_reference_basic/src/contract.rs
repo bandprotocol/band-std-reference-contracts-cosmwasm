@@ -440,29 +440,6 @@ mod tests {
 
         use super::*;
 
-        //
-        // #[test]
-        // fn add_relayer_by_owner() {
-        //     // Setup
-        //     let mut deps = mock_dependencies();
-        //     let init_msg = InstantiateMsg {};
-        //     let info = mock_info("owner", &[]);
-        //     let env = mock_env();
-        //     instantiate(deps.as_mut(), env.clone(), info, init_msg).unwrap();
-        //
-        //     // Test authorized attempt to add relayer
-        //     let info = mock_info("owner", &[]);
-        //     let env = mock_env();
-        //     let msg = AddRelayers {
-        //         relayers: vec![Addr::unchecked("relayer_1")],
-        //     };
-        //     execute(deps.as_mut(), env, info, msg).unwrap();
-        //
-        //     // Check if relayer is successfully added
-        //     let is_relayer = query_is_relayer(deps.as_ref(), Addr::unchecked("relayer_1")).unwrap();
-        //     assert_eq!(is_relayer, true);
-        // }
-
         #[test]
         fn add_relayers_by_owner() {
             // Setup

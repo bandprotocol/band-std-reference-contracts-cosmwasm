@@ -1,11 +1,20 @@
 use cosmwasm_std::{
     entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
-    StdResult,
+    StdResult, Storage,
 };
 
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::CONFIG;
 use crate::struct_types::{Config, ReferenceData};
+
+pub fn is_owner(storage: &mut dyn Storage, info: &MessageInfo) -> StdResult<()> {
+    let config = CONFIG.load(storage)?;
+    if info.sender != config.owner {
+        Err(StdError::generic_err("NOT_AUTHORIZED"))
+    } else {
+        Ok(())
+    }
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -43,20 +52,17 @@ pub fn execute_update_config(
     new_owner: Option<Addr>,
     new_reference_contract: Option<Addr>,
 ) -> StdResult<Response> {
+    is_owner(deps.storage, &info)?;
+
     let mut config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(StdError::generic_err("NOT_AUTHORIZED"));
+
+    if let Some(owner) = new_owner {
+        config.owner = owner;
     }
 
-    match new_owner {
-        Some(addr) => config.owner = addr,
-        None => (),
-    };
-
-    match new_reference_contract {
-        Some(addr) => config.reference_contract = addr,
-        None => (),
-    };
+    if let Some(reference_contract) = new_reference_contract {
+        config.reference_contract = reference_contract;
+    }
 
     CONFIG.save(deps.storage, &config)?;
 
@@ -83,10 +89,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 fn query_config(deps: Deps) -> StdResult<Config> {
-    match CONFIG.may_load(deps.storage)? {
-        Some(config) => Ok(config),
-        None => Err(StdError::generic_err("CONFIG_NOT_INITIALIZED")),
-    }
+    Ok(CONFIG.load(deps.storage)?)
 }
 
 fn query_reference_data(

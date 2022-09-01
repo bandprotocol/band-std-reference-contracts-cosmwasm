@@ -7,11 +7,6 @@ pub struct Config {
     pub owner: Addr,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct Relayer {
-    pub address: Addr,
-}
-
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, JsonSchema)]
 pub struct ReferenceData {
     pub rate: Uint128,

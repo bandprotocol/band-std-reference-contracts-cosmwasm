@@ -1,13 +1,22 @@
 use cosmwasm_std::{
     entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
-    StdResult, Uint128,
+    StdResult, Storage, Uint128,
 };
 
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::{CONFIG, REFDATA, RELAYERS};
-use crate::struct_types::{Config, RefData, ReferenceData, Relayer};
+use crate::struct_types::{Config, RefData, ReferenceData};
 
 pub static E9: u128 = 1_000_000_000;
+
+pub fn is_owner(storage: &mut dyn Storage, info: &MessageInfo) -> StdResult<()> {
+    let config = CONFIG.load(storage)?;
+    if info.sender != config.owner {
+        Err(StdError::generic_err("NOT_AUTHORIZED"))
+    } else {
+        Ok(())
+    }
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -51,10 +60,9 @@ pub fn execute_update_config(
     info: MessageInfo,
     new_owner: Addr,
 ) -> StdResult<Response> {
+    is_owner(deps.storage, &info)?;
+
     let mut config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(StdError::generic_err("NOT_AUTHORIZED"));
-    }
 
     config.owner = new_owner;
 
@@ -68,16 +76,10 @@ pub fn execute_add_relayers(
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(StdError::generic_err("NOT_AUTHORIZED"));
-    }
+    is_owner(deps.storage, &info)?;
 
     for relayer_addr in relayers {
-        let relayer = Relayer {
-            address: relayer_addr.clone(),
-        };
-        RELAYERS.save(deps.storage, &relayer_addr.to_string(), &relayer)?;
+        RELAYERS.save(deps.storage, relayer_addr.as_str(), &true)?;
     }
 
     Ok(Response::new().add_attribute("action", "add_relayers"))
@@ -88,10 +90,7 @@ pub fn execute_remove_relayers(
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    let config = CONFIG.load(deps.storage)?;
-    if info.sender != config.owner {
-        return Err(StdError::generic_err("NOT_AUTHORIZED"));
-    }
+    is_owner(deps.storage, &info)?;
 
     for relayer_addr in relayers {
         RELAYERS.remove(deps.storage, &relayer_addr.to_string());
@@ -112,29 +111,21 @@ pub fn execute_relay(
         return Err(StdError::generic_err("NOT_A_RELAYER"));
     }
 
-    if !(rates.len() == symbols.len()) {
+    if rates.len() != symbols.len() {
         return Err(StdError::generic_err("MISMATCHED_INPUT_SIZES"));
     }
 
     for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
-        match REFDATA.may_load(deps.storage, &symbol)? {
-            Some(existing_refdata) => {
-                if existing_refdata.resolve_time < resolve_time {
-                    REFDATA.save(
-                        deps.storage,
-                        &symbol,
-                        &RefData::new(rate, resolve_time, request_id),
-                    )?;
-                } else {
-                    return Err(StdError::generic_err("INVALID_RESOLVE_TIME"));
-                }
+        if let Some(existing_refdata) = REFDATA.may_load(deps.storage, &symbol)? {
+            if existing_refdata.resolve_time >= resolve_time {
+                continue;
             }
-            None => REFDATA.save(
-                deps.storage,
-                &symbol,
-                &RefData::new(rate, resolve_time, request_id),
-            )?,
         }
+        REFDATA.save(
+            deps.storage,
+            &symbol,
+            &RefData::new(rate, resolve_time, request_id),
+        )?
     }
 
     Ok(Response::default().add_attribute("action", "execute_relay"))
@@ -490,7 +481,7 @@ mod tests {
         }
 
         #[test]
-        fn remove_relayer_by_owner() {
+        fn remove_relayers_by_owner() {
             // Setup
             let mut deps = mock_dependencies();
             let relayers_list = vec!["relayer_1", "relayer_2", "relayer_3"]
@@ -517,7 +508,7 @@ mod tests {
         }
 
         #[test]
-        fn remove_relayer_by_other() {
+        fn remove_relayers_by_other() {
             // Setup
             let mut deps = mock_dependencies();
             let relayers = vec![Addr::unchecked("relayer_1")];
@@ -567,10 +558,63 @@ mod tests {
             )
             .unwrap();
             let retrieved_rates = reference_datas
+                .clone()
                 .into_iter()
                 .map(|rd| rd.rate / Uint128::new(E9))
                 .collect::<Vec<Uint128>>();
-            assert_eq!(retrieved_rates, rates);
+            assert_eq!(retrieved_rates, rates.clone());
+        }
+
+        #[test]
+        fn attempt_relay_by_relayer_with_mismatched_input_sizes() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Test attempt to relay with mismatched input sizes
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let mismatched_rates = vec![Uint128::new(1)];
+            let msg = Relay {
+                symbols,
+                rates: mismatched_rates,
+                resolve_time: 100,
+                request_id: 1,
+            };
+            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
+            assert_eq!(err, StdError::generic_err("MISMATCHED_INPUT_SIZES"))
+        }
+
+        #[test]
+        fn attempt_relay_by_relayer_with_invalid_resolve_time() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Relay initial set of data
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 100,
+                request_id: 1,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
 
             // Test attempt to relay with invalid resolve times
             let info = mock_info(relayer.as_str(), &[]);
@@ -582,24 +626,26 @@ mod tests {
             let msg = Relay {
                 symbols: symbols.clone(),
                 rates: old_rates,
-                resolve_time: 100,
+                resolve_time: 90,
                 request_id: 1,
             };
-            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-            assert_eq!(err, StdError::generic_err("INVALID_RESOLVE_TIME"));
+            execute(deps.as_mut(), env, info, msg).unwrap();
 
-            // Test attempt to relay with mismatch input sizes
-            let info = mock_info(relayer.as_str(), &[]);
-            let env = mock_env();
-            let mismatched_rates = vec![Uint128::new(1)];
-            let msg = Relay {
-                symbols: symbols.clone(),
-                rates: mismatched_rates,
-                resolve_time: 100,
-                request_id: 1,
-            };
-            let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
-            assert_eq!(err, StdError::generic_err("MISMATCHED_INPUT_SIZES"))
+            // Check if relay was successful
+            let reference_datas = query_reference_data_bulk(
+                deps.as_ref(),
+                symbols.clone(),
+                std::iter::repeat("USD".to_string())
+                    .take(*&symbols.len())
+                    .collect::<Vec<String>>(),
+            )
+            .unwrap();
+            let retrieved_rates = reference_datas
+                .clone()
+                .into_iter()
+                .map(|rd| rd.rate / Uint128::new(E9))
+                .collect::<Vec<Uint128>>();
+            assert_eq!(retrieved_rates, rates);
         }
 
         #[test]

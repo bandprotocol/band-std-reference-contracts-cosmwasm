@@ -7,9 +7,9 @@ use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::CONFIG;
 use crate::struct_types::{Config, ReferenceData};
 
-pub fn is_owner(storage: &mut dyn Storage, info: &MessageInfo) -> StdResult<()> {
+pub fn is_owner(storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
     let config = CONFIG.load(storage)?;
-    if info.sender != config.owner {
+    if *sender != config.owner {
         Err(StdError::generic_err("NOT_AUTHORIZED"))
     } else {
         Ok(())
@@ -52,7 +52,7 @@ pub fn execute_update_config(
     new_owner: Option<Addr>,
     new_reference_contract: Option<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info)?;
+    is_owner(deps.storage, &info.sender)?;
 
     let mut config = CONFIG.load(deps.storage)?;
 
@@ -89,7 +89,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 fn query_config(deps: Deps) -> StdResult<Config> {
-    Ok(CONFIG.load(deps.storage)?)
+    CONFIG.load(deps.storage)
 }
 
 fn query_reference_data(

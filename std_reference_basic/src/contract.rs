@@ -9,15 +9,6 @@ use crate::struct_types::{Config, RefData, ReferenceData};
 
 pub static E9: u128 = 1_000_000_000;
 
-pub fn is_owner(storage: &mut dyn Storage, info: &MessageInfo) -> StdResult<()> {
-    let config = CONFIG.load(storage)?;
-    if info.sender != config.owner {
-        Err(StdError::generic_err("NOT_AUTHORIZED"))
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
@@ -55,12 +46,17 @@ pub fn execute(
     }
 }
 
-pub fn execute_update_config(
-    deps: DepsMut,
-    info: MessageInfo,
-    new_owner: Addr,
-) -> StdResult<Response> {
-    is_owner(deps.storage, &info)?;
+pub fn is_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
+    let config = CONFIG.load(storage)?;
+    if *sender != config.owner {
+        Err(StdError::generic_err("NOT_AUTHORIZED"))
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_update_config(deps: DepsMut, info: MessageInfo, new_owner: Addr) -> StdResult<Response> {
+    is_owner(deps.storage, &info.sender)?;
 
     let mut config = CONFIG.load(deps.storage)?;
 
@@ -71,35 +67,35 @@ pub fn execute_update_config(
     Ok(Response::new().add_attribute("action", "update_config"))
 }
 
-pub fn execute_add_relayers(
+fn execute_add_relayers(
     deps: DepsMut,
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info)?;
+    is_owner(deps.storage, &info.sender)?;
 
-    for relayer_addr in relayers {
-        RELAYERS.save(deps.storage, relayer_addr.as_str(), &true)?;
+    for relayer in relayers {
+        RELAYERS.save(deps.storage, &relayer, &true)?;
     }
 
     Ok(Response::new().add_attribute("action", "add_relayers"))
 }
 
-pub fn execute_remove_relayers(
+fn execute_remove_relayers(
     deps: DepsMut,
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info)?;
+    is_owner(deps.storage, &info.sender)?;
 
-    for relayer_addr in relayers {
-        RELAYERS.remove(deps.storage, &relayer_addr.to_string());
+    for relayer in relayers {
+        RELAYERS.remove(deps.storage, &relayer);
     }
 
     Ok(Response::new().add_attribute("action", "remove_relayers"))
 }
 
-pub fn execute_relay(
+fn execute_relay(
     deps: DepsMut,
     info: MessageInfo,
     symbols: Vec<String>,
@@ -107,23 +103,23 @@ pub fn execute_relay(
     resolve_time: u64,
     request_id: u64,
 ) -> StdResult<Response> {
-    if !query_is_relayer(deps.as_ref(), info.sender).unwrap() {
+    if !query_is_relayer(deps.as_ref(), &info.sender)? {
         return Err(StdError::generic_err("NOT_A_RELAYER"));
     }
 
-    if rates.len() != symbols.len() {
+    if symbols.len() != rates.len() {
         return Err(StdError::generic_err("MISMATCHED_INPUT_SIZES"));
     }
 
-    for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
-        if let Some(existing_refdata) = REFDATA.may_load(deps.storage, &symbol)? {
+    for (symbol, rate) in symbols.iter().zip(rates.into_iter()) {
+        if let Some(existing_refdata) = REFDATA.may_load(deps.storage, symbol)? {
             if existing_refdata.resolve_time >= resolve_time {
                 continue;
             }
         }
         REFDATA.save(
             deps.storage,
-            &symbol,
+            symbol,
             &RefData::new(rate, resolve_time, request_id),
         )?
     }
@@ -131,7 +127,7 @@ pub fn execute_relay(
     Ok(Response::default().add_attribute("action", "execute_relay"))
 }
 
-pub fn execute_force_relay(
+fn execute_force_relay(
     deps: DepsMut,
     info: MessageInfo,
     symbols: Vec<String>,
@@ -139,18 +135,18 @@ pub fn execute_force_relay(
     resolve_time: u64,
     request_id: u64,
 ) -> StdResult<Response> {
-    if !query_is_relayer(deps.as_ref(), info.sender).unwrap() {
+    if !query_is_relayer(deps.as_ref(), &info.sender)? {
         return Err(StdError::generic_err("NOT_A_RELAYER"));
     }
 
-    if !(rates.len() == symbols.len()) {
+    if symbols.len() != rates.len() {
         return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
     }
 
-    for (symbol, rate) in symbols.into_iter().zip(rates.into_iter()) {
+    for (symbol, rate) in symbols.iter().zip(rates.into_iter()) {
         REFDATA.save(
             deps.storage,
-            &symbol,
+            symbol,
             &RefData::new(rate, resolve_time, request_id),
         )?;
     }
@@ -162,12 +158,12 @@ pub fn execute_force_relay(
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_binary(&query_config(deps)?),
-        QueryMsg::IsRelayer { relayer } => to_binary(&query_is_relayer(deps, relayer)?),
-        QueryMsg::GetRef { symbol } => to_binary(&query_ref(deps, symbol)?),
+        QueryMsg::IsRelayer { relayer } => to_binary(&query_is_relayer(deps, &relayer)?),
+        QueryMsg::GetRef { symbol } => to_binary(&query_ref(deps, &symbol)?),
         QueryMsg::GetReferenceData {
             base_symbol,
             quote_symbol,
-        } => to_binary(&query_reference_data(deps, base_symbol, quote_symbol)?),
+        } => to_binary(&query_reference_data(deps, &base_symbol, &quote_symbol)?),
         QueryMsg::GetReferenceDataBulk {
             base_symbols,
             quote_symbols,
@@ -180,61 +176,34 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 fn query_config(deps: Deps) -> StdResult<Config> {
-    match CONFIG.may_load(deps.storage)? {
-        Some(config) => Ok(config),
-        None => Err(StdError::generic_err("CONFIG_NOT_INITIALIZED")),
-    }
+    CONFIG.load(deps.storage)
 }
 
-fn query_is_relayer(deps: Deps, relayer: Addr) -> StdResult<bool> {
-    match RELAYERS.may_load(deps.storage, &relayer.to_string())? {
-        Some(_relayer) => Ok(true),
-        None => Ok(false),
-    }
+fn query_is_relayer(deps: Deps, relayer: &Addr) -> StdResult<bool> {
+    Ok(RELAYERS.may_load(deps.storage, relayer)?.is_some())
 }
 
-fn query_ref(deps: Deps, symbol: String) -> StdResult<RefData> {
-    if symbol == String::from("USD") {
+fn query_ref(deps: Deps, symbol: &str) -> StdResult<RefData> {
+    if symbol == "USD" {
         return Ok(RefData::new(Uint128::new(E9), u64::MAX, 0));
     }
 
-    match REFDATA.may_load(deps.storage, &symbol)? {
-        Some(refdata) => Ok(refdata),
-        None => Err(StdError::generic_err(format!(
-            "DATA_NOT_AVAILABLE_FOR_{}",
-            symbol
-        ))),
-    }
+    REFDATA.load(deps.storage, symbol)
 }
 
 fn query_reference_data(
     deps: Deps,
-    base_symbol: String,
-    quote_symbol: String,
+    base_symbol: &str,
+    quote_symbol: &str,
 ) -> StdResult<ReferenceData> {
-    let mut ref_datas: Vec<RefData> = vec![];
-    let mut dne_symbols: Vec<String> = vec![];
+    let base = query_ref(deps, base_symbol)?;
+    let quote = query_ref(deps, quote_symbol)?;
 
-    for sym in vec![base_symbol, quote_symbol] {
-        match query_ref(deps, sym.clone()) {
-            Ok(r) => ref_datas.push(r),
-            Err(_r) => dne_symbols.push(sym),
-        }
-    }
-
-    if dne_symbols.len() != 0 {
-        let err_msg = dne_symbols.join("_");
-        Err(StdError::generic_err(format!(
-            "DATA_NOT_AVAILABLE_FOR_{}",
-            err_msg
-        )))
-    } else {
-        Ok(ReferenceData::new(
-            ref_datas[0].rate * Uint128::new(E9 * E9) / ref_datas[1].rate,
-            ref_datas[0].resolve_time,
-            ref_datas[1].resolve_time,
-        ))
-    }
+    Ok(ReferenceData::new(
+        base.rate * Uint128::new(E9 * E9) / quote.rate,
+        base.resolve_time,
+        quote.resolve_time,
+    ))
 }
 
 fn query_reference_data_bulk(
@@ -246,27 +215,11 @@ fn query_reference_data_bulk(
         return Err(StdError::generic_err("NOT_ALL_INPUT_SIZES_ARE_THE_SAME"));
     }
 
-    let mut ref_datas: Vec<ReferenceData> = vec![];
-    let mut dne_symbols: Vec<String> = vec![];
-
-    for (b, q) in base_symbols.iter().zip(quote_symbols.iter()) {
-        match query_reference_data(deps, b.to_owned(), q.to_owned()) {
-            Ok(r) => ref_datas.push(r),
-            Err(r) => dne_symbols.extend(r.to_string()[38..].split("_").map(|s| s.to_string())),
-        }
-    }
-
-    if dne_symbols.len() != 0 {
-        dne_symbols.sort();
-        dne_symbols.dedup();
-        let err_msg = dne_symbols.join("_");
-        Err(StdError::generic_err(format!(
-            "DATA_NOT_AVAILABLE_FOR_{}",
-            err_msg
-        )))
-    } else {
-        Ok(ref_datas)
-    }
+    base_symbols
+        .iter()
+        .zip(quote_symbols.iter())
+        .map(|(b, q)| query_reference_data(deps, b, q))
+        .collect()
 }
 
 #[cfg(test)]
@@ -292,6 +245,14 @@ mod tests {
         )
     }
 
+    fn is_relayers(deps: Deps, relayers: &[Addr]) -> Vec<bool> {
+        relayers
+            .iter()
+            .map(|r| query_is_relayer(deps, r))
+            .collect::<StdResult<Vec<bool>>>()
+            .unwrap()
+    }
+
     // This function will setup the relayer for other tests
     fn setup_relayers(mut deps: DepsMut, sender: &str, relayers: Vec<Addr>) {
         setup(deps.branch(), sender);
@@ -308,15 +269,10 @@ mod tests {
         execute(deps.branch(), env, info, msg).unwrap();
 
         // Check if relayer is successfully added
-        let is_relayers = relayers
-            .into_iter()
-            .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
-            .collect::<Vec<bool>>();
-
         assert_eq!(
-            is_relayers,
+            is_relayers(deps.as_ref(), &relayers),
             std::iter::repeat(true)
-                .take(is_relayers.len())
+                .take(relayers.len())
                 .collect::<Vec<bool>>()
         );
     }
@@ -348,7 +304,7 @@ mod tests {
             deps.as_ref(),
             symbols.clone(),
             std::iter::repeat("USD".to_string())
-                .take(*&symbols.len())
+                .take(symbols.len())
                 .collect::<Vec<String>>(),
         )
         .unwrap();
@@ -439,26 +395,23 @@ mod tests {
             let info = mock_info("owner", &[]);
             let env = mock_env();
             instantiate(deps.as_mut(), env.clone(), info, init_msg).unwrap();
-            let relayers_to_add = vec!["relayer_1", "relayer_2", "relayer_3"];
+            let relayers_to_add: Vec<Addr> = vec!["relayer_1", "relayer_2", "relayer_3"]
+                .into_iter()
+                .map(Addr::unchecked)
+                .collect();
 
             // Test authorized attempt to add relayers
             let info = mock_info("owner", &[]);
             let env = mock_env();
             let msg = AddRelayers {
-                relayers: relayers_to_add
-                    .clone()
-                    .into_iter()
-                    .map(|r| Addr::unchecked(r))
-                    .collect::<Vec<Addr>>(),
+                relayers: relayers_to_add.clone(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
-            // Check if relayer is successfully added
-            let is_relayers = relayers_to_add
-                .into_iter()
-                .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
-                .collect::<Vec<bool>>();
-            assert_eq!(is_relayers, [true, true, true]);
+            assert_eq!(
+                is_relayers(deps.as_ref(), &relayers_to_add),
+                [true, true, true]
+            );
         }
 
         #[test]
@@ -486,7 +439,7 @@ mod tests {
             let mut deps = mock_dependencies();
             let relayers_list = vec!["relayer_1", "relayer_2", "relayer_3"]
                 .into_iter()
-                .map(|r| Addr::unchecked(r))
+                .map(Addr::unchecked)
                 .collect::<Vec<Addr>>();
             setup_relayers(deps.as_mut(), "owner", relayers_list.clone());
 
@@ -499,12 +452,10 @@ mod tests {
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
-            // Check if relayers were successfully removed
-            let is_relayers = relayers_list
-                .into_iter()
-                .map(|r| query_is_relayer(deps.as_ref(), Addr::unchecked(r)).unwrap())
-                .collect::<Vec<bool>>();
-            assert_eq!(is_relayers, [false, false, true]);
+            assert_eq!(
+                is_relayers(deps.as_ref(), &relayers_list),
+                [false, false, true]
+            );
         }
 
         #[test]
@@ -553,7 +504,7 @@ mod tests {
                 deps.as_ref(),
                 symbols.clone(),
                 std::iter::repeat("USD".to_string())
-                    .take(*&symbols.len())
+                    .take(symbols.len())
                     .collect::<Vec<String>>(),
             )
             .unwrap();
@@ -721,7 +672,7 @@ mod tests {
                 deps.as_ref(),
                 symbols.clone(),
                 std::iter::repeat("USD".to_string())
-                    .take(*&symbols.len())
+                    .take(symbols.len())
                     .collect::<Vec<String>>(),
             )
             .unwrap();
@@ -788,10 +739,10 @@ mod tests {
             let relayer = Addr::unchecked("relayer");
             setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
 
-            // Test if is_relayers results are correct
-            assert_eq!(query_is_relayer(deps.as_ref(), relayer).unwrap(), true);
+            // Test if is_relayer results are correct
+            assert_eq!(query_is_relayer(deps.as_ref(), &relayer).unwrap(), true);
             assert_eq!(
-                query_is_relayer(deps.as_ref(), Addr::unchecked("not_a_relayer")).unwrap(),
+                query_is_relayer(deps.as_ref(), &Addr::unchecked("not_a_relayer")).unwrap(),
                 false
             );
         }
@@ -830,7 +781,10 @@ mod tests {
                 symbol: "DNE".to_string(),
             };
             let err = query(deps.as_ref(), env, msg).unwrap_err();
-            assert_eq!(err, StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE"));
+            assert_eq!(
+                err,
+                StdError::not_found("std_reference_basic::struct_types::RefData")
+            );
         }
 
         #[test]
@@ -869,7 +823,10 @@ mod tests {
                 quote_symbol: "USD".to_string(),
             };
             let err = query(deps.as_ref(), env, msg).unwrap_err();
-            assert_eq!(err, StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE"));
+            assert_eq!(
+                err,
+                StdError::not_found("std_reference_basic::struct_types::RefData")
+            );
             // Test invalid symbols
             let env = mock_env();
             let msg = GetReferenceData {
@@ -879,7 +836,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::not_found("std_reference_basic::struct_types::RefData")
             );
         }
 
@@ -940,7 +897,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::not_found("std_reference_basic::struct_types::RefData")
             );
 
             // Test invalid symbols
@@ -958,7 +915,7 @@ mod tests {
             let err = query(deps.as_ref(), env, msg).unwrap_err();
             assert_eq!(
                 err,
-                StdError::generic_err("DATA_NOT_AVAILABLE_FOR_DNE1_DNE2")
+                StdError::not_found("std_reference_basic::struct_types::RefData")
             );
         }
     }

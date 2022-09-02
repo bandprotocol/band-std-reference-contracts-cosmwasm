@@ -199,12 +199,19 @@ mod tests {
                     reference_contract: Addr::unchecked("contract"),
                 }
             );
+        }
 
-            // Test attempt to partially update config
-            let info = mock_info("new_owner", &[]);
+        #[test]
+        fn can_update_owner_only() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner", "contract");
+
+            // Test attempt to only update owner
+            let info = mock_info("owner", &[]);
             let env = mock_env();
             let msg = UpdateConfig {
-                new_owner: Option::from(Addr::unchecked("owner")),
+                new_owner: Option::from(Addr::unchecked("new_owner")),
                 new_reference_contract: None,
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
@@ -212,8 +219,32 @@ mod tests {
             assert_eq!(
                 config,
                 Config {
-                    owner: Addr::unchecked("owner"),
+                    owner: Addr::unchecked("new_owner"),
                     reference_contract: Addr::unchecked("contract"),
+                }
+            );
+        }
+
+        #[test]
+        fn can_update_reference_contract_only() {
+            // Setup
+            let mut deps = mock_dependencies();
+            setup(deps.as_mut(), "owner", "contract");
+
+            // Test attempt to only update reference contract
+            let info = mock_info("owner", &[]);
+            let env = mock_env();
+            let msg = UpdateConfig {
+                new_owner: None,
+                new_reference_contract: Option::from(Addr::unchecked("new_contract")),
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+            let config = query_config(deps.as_ref()).unwrap();
+            assert_eq!(
+                config,
+                Config {
+                    owner: Addr::unchecked("owner"),
+                    reference_contract: Addr::unchecked("new_contract"),
                 }
             );
         }

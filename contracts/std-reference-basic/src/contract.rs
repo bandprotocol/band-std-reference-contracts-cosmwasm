@@ -46,7 +46,7 @@ pub fn execute(
     }
 }
 
-fn is_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
+fn check_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
     let config = CONFIG.load(storage)?;
     if *sender != config.owner {
         Err(StdError::generic_err("NOT_AUTHORIZED"))
@@ -56,7 +56,7 @@ fn is_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
 }
 
 fn execute_update_config(deps: DepsMut, info: MessageInfo, new_owner: Addr) -> StdResult<Response> {
-    is_owner(deps.storage, &info.sender)?;
+    check_owner(deps.storage, &info.sender)?;
 
     let mut config = CONFIG.load(deps.storage)?;
 
@@ -72,7 +72,7 @@ fn execute_add_relayers(
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info.sender)?;
+    check_owner(deps.storage, &info.sender)?;
 
     for relayer in relayers {
         RELAYERS.save(deps.storage, &relayer, &true)?;
@@ -86,7 +86,7 @@ fn execute_remove_relayers(
     info: MessageInfo,
     relayers: Vec<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info.sender)?;
+    check_owner(deps.storage, &info.sender)?;
 
     for relayer in relayers {
         RELAYERS.remove(deps.storage, &relayer);

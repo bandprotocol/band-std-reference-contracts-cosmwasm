@@ -37,7 +37,7 @@ pub fn execute(
     }
 }
 
-fn is_owner(storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
+fn check_owner(storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
     let config = CONFIG.load(storage)?;
     if *sender != config.owner {
         Err(StdError::generic_err("NOT_AUTHORIZED"))
@@ -52,7 +52,7 @@ fn execute_update_config(
     new_owner: Option<Addr>,
     new_reference_contract: Option<Addr>,
 ) -> StdResult<Response> {
-    is_owner(deps.storage, &info.sender)?;
+    check_owner(deps.storage, &info.sender)?;
 
     let mut config = CONFIG.load(deps.storage)?;
 

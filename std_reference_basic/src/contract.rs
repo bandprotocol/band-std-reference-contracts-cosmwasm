@@ -46,7 +46,7 @@ pub fn execute(
     }
 }
 
-pub fn is_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
+fn is_owner(storage: &mut dyn Storage, sender: &Addr) -> StdResult<()> {
     let config = CONFIG.load(storage)?;
     if *sender != config.owner {
         Err(StdError::generic_err("NOT_AUTHORIZED"))

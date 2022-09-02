@@ -7,15 +7,6 @@ use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::CONFIG;
 use crate::struct_types::{Config, ReferenceData};
 
-pub fn is_owner(storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
-    let config = CONFIG.load(storage)?;
-    if *sender != config.owner {
-        Err(StdError::generic_err("NOT_AUTHORIZED"))
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
     deps: DepsMut,
@@ -46,7 +37,16 @@ pub fn execute(
     }
 }
 
-pub fn execute_update_config(
+fn is_owner(storage: &dyn Storage, sender: &Addr) -> StdResult<()> {
+    let config = CONFIG.load(storage)?;
+    if *sender != config.owner {
+        Err(StdError::generic_err("NOT_AUTHORIZED"))
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,
     new_owner: Option<Addr>,

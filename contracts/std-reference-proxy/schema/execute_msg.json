@@ -5,37 +5,31 @@
     {
       "type": "object",
       "required": [
-        "transfer_ownership"
+        "update_config"
       ],
       "properties": {
-        "transfer_ownership": {
+        "update_config": {
           "type": "object",
-          "required": [
-            "new_owner"
-          ],
           "properties": {
             "new_owner": {
-              "$ref": "#/definitions/Addr"
-            }
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "required": [
-        "set_ref"
-      ],
-      "properties": {
-        "set_ref": {
-          "type": "object",
-          "required": [
-            "new_ref"
-          ],
-          "properties": {
-            "new_ref": {
-              "$ref": "#/definitions/Addr"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Addr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "new_reference_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/Addr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         }

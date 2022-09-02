@@ -3,10 +3,10 @@
   "title": "InstantiateMsg",
   "type": "object",
   "required": [
-    "initial_ref"
+    "reference_contract"
   ],
   "properties": {
-    "initial_ref": {
+    "reference_contract": {
       "$ref": "#/definitions/Addr"
     }
   },

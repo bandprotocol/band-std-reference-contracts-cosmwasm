@@ -600,6 +600,79 @@ mod tests {
         }
 
         #[test]
+        fn attempt_relay_by_relayer_with_partially_invalid_resolve_time() {
+            // Setup
+            let mut deps = mock_dependencies();
+            let relayer = Addr::unchecked("relayer");
+            setup_relayers(deps.as_mut(), "owner", vec![relayer.clone()]);
+
+            // Relay initial set of data
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let symbols = vec!["AAA", "BBB", "CCC"]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let rates = [1000, 2000, 3000]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: rates.clone(),
+                resolve_time: 10,
+                request_id: 1,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Only relay one symbol
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let msg = Relay {
+                symbols: vec![String::from("AAA")],
+                rates: vec![Uint128::new(99999)],
+                resolve_time: 20,
+                request_id: 3,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Test attempt to relay with partially invalid resolve times
+            let info = mock_info(relayer.as_str(), &[]);
+            let env = mock_env();
+            let update_rates = [1, 2, 3]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            let msg = Relay {
+                symbols: symbols.clone(),
+                rates: update_rates,
+                resolve_time: 15,
+                request_id: 2,
+            };
+            execute(deps.as_mut(), env, info, msg).unwrap();
+
+            // Check if relay was successful
+            let reference_datas = query_reference_data_bulk(
+                deps.as_ref(),
+                symbols.clone(),
+                std::iter::repeat("USD".to_string())
+                    .take(*&symbols.len())
+                    .collect::<Vec<String>>(),
+            )
+            .unwrap();
+            let retrieved_rates = reference_datas
+                .clone()
+                .into_iter()
+                .map(|rd| rd.rate / Uint128::new(E9))
+                .collect::<Vec<Uint128>>();
+            let expected_rates = vec![99999, 2, 3]
+                .iter()
+                .map(|r| Uint128::new(*r))
+                .collect::<Vec<Uint128>>();
+            assert_eq!(retrieved_rates, expected_rates);
+        }
+
+        #[test]
         fn attempt_relay_by_others() {
             // Setup
             let mut deps = mock_dependencies();

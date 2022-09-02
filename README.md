@@ -10,10 +10,8 @@ our [documentation](https://docs.bandchain.org/band-standard-dataset/supported-b
 
 ### Contract
 
-Running `/scripts/build_aritfacts.sh` to compile and optimize all contracts. The `.wasm` file and their checksums can be
-found in `./artifacts`
-
-### Schemas
+To compile all contracts, run the following script in the repo root: `/scripts/build_aritfacts.sh`
+The optimized wasm code and its checksums can be found in the `/artifacts` directory.
 
 ## Usage
 

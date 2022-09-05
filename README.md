@@ -6,6 +6,13 @@ This repository contains the CosmWasm code for Band Protocol's StdReference cont
 addresses can be found in
 our [documentation](https://docs.bandchain.org/band-standard-dataset/supported-blockchains.html).
 
+## Build
+
+### Contract
+
+To compile all contracts, run the following script in the repo root: `/scripts/build_aritfacts.sh`
+The optimized wasm code and its checksums can be found in the `/artifacts` directory.
+
 ## Usage
 
 To query the prices from Band Protocol's StdReference contracts, the contract looking to use the price values should

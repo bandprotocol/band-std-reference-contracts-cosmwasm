@@ -11,7 +11,14 @@ our [documentation](https://docs.bandchain.org/band-standard-dataset/supported-b
 ### Contract
 
 To compile all contracts, run the following script in the repo root: `/scripts/build_artifacts.sh`
-The optimized wasm code and its checksums can be found in the `/artifacts` directory.
+The optimized wasm code and its checksums can be found in the `/artifacts` directory or simply run the command below: 
+
+```
+docker run --rm -v "$(pwd)":/code \
+  --mount type=volume,source="$(basename "$(pwd)")_cache",target=/code/target \
+  --mount type=volume,source=registry_cache,target=/usr/local/cargo/registry \
+  cosmwasm/workspace-optimizer:0.12.7
+```
 
 ## Usage
 

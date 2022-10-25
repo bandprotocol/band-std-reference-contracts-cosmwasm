@@ -1,5 +1,5 @@
 [workspace]
-members = ["contracts/std-reference-proxy", "contracts/std-reference-basic"]
+members = ["contracts/std-reference"]
 resolver = "2"
 
 [profile.dev]

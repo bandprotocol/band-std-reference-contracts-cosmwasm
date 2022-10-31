@@ -61,9 +61,9 @@ pub struct ReferenceData {
     // Pair rate e.g. rate of BTC/USD
     pub rate: Uint256,
     // Unix time of when the base asset was last updated. e.g. Last update time of BTC in Unix time
-    pub last_updated_base: u64,
+    pub last_updated_base: Uint64,
     // Unix time of when the quote asset was last updated. e.g. Last update time of USD in Unix time
-    pub last_updated_quote: u64,
+    pub last_updated_quote: Uint64,
 }
 ```
 

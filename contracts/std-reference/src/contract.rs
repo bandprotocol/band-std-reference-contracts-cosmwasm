@@ -130,7 +130,7 @@ fn execute_relay(
     request_id: Uint64,
 ) -> Result<Response, ContractError> {
     // Checks if sender is a relayer
-    let sender_addr = &info.sender.clone();
+    let sender_addr = &info.sender;
     if !query_is_relayer(deps.as_ref(), sender_addr)? {
         return Err(ContractError::Unauthorized {
             msg: String::from("Sender is not a relayer"),
@@ -161,7 +161,7 @@ fn execute_force_relay(
     resolve_time: Uint64,
     request_id: Uint64,
 ) -> Result<Response, ContractError> {
-    let sender_addr = &info.sender.clone();
+    let sender_addr = &info.sender;
 
     if !query_is_relayer(deps.as_ref(), sender_addr)? {
         return Err(ContractError::Unauthorized {

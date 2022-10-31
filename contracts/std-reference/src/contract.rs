@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     entry_point, to_binary, Addr, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError,
-    StdResult, Uint128, Uint256,
+    StdResult, Uint256, Uint64,
 };
 use cw2::{get_contract_version, set_contract_version};
 use semver::Version;
@@ -9,7 +9,8 @@ use crate::errors::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
 use crate::state::{RefData, ReferenceData, ADMIN, REFDATA, RELAYERS};
 
-pub static E9: Uint128 = Uint128::new(1_000_000_000);
+const E9: Uint64 = Uint64::new(1_000_000_000u64);
+const E18: Uint256 = Uint256::from_u128(1_000_000_000_000_000_000u128);
 
 // Version Info
 const CONTRACT_NAME: &str = "band-standard-reference";
@@ -64,10 +65,10 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
         StdError::generic_err(format!("Semver: {}", err))
     }
 
-    // Current contract version
+    // New contract version
     let version: Version = CONTRACT_VERSION.parse().map_err(from_semver)?;
 
-    // Storage contract
+    // Current contract version
     let stored_info = get_contract_version(deps.storage)?;
 
     // Stored contract version
@@ -124,9 +125,9 @@ fn execute_remove_relayers(
 fn execute_relay(
     deps: DepsMut,
     info: MessageInfo,
-    symbol_rates: Vec<(String, Uint128)>,
-    resolve_time: u64,
-    request_id: u64,
+    symbol_rates: Vec<(String, Uint64)>,
+    resolve_time: Uint64,
+    request_id: Uint64,
 ) -> Result<Response, ContractError> {
     // Checks if sender is a relayer
     let sender_addr = &info.sender.clone();
@@ -156,9 +157,9 @@ fn execute_relay(
 fn execute_force_relay(
     deps: DepsMut,
     info: MessageInfo,
-    symbol_rates: Vec<(String, Uint128)>,
-    resolve_time: u64,
-    request_id: u64,
+    symbol_rates: Vec<(String, Uint64)>,
+    resolve_time: Uint64,
+    request_id: Uint64,
 ) -> Result<Response, ContractError> {
     let sender_addr = &info.sender.clone();
 
@@ -188,10 +189,10 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::GetRef { symbol } => to_binary(&query_ref(deps, &symbol)?),
         QueryMsg::GetReferenceData { symbol_pair } => {
-            to_binary(&query_reference_data(deps, symbol_pair)?)
+            to_binary(&query_reference_data(deps, &symbol_pair)?)
         }
         QueryMsg::GetReferenceDataBulk { symbol_pairs } => {
-            to_binary(&query_reference_data_bulk(deps, symbol_pairs)?)
+            to_binary(&query_reference_data_bulk(deps, &symbol_pairs)?)
         }
     }
 }
@@ -202,18 +203,20 @@ fn query_is_relayer(deps: Deps, relayer: &Addr) -> StdResult<bool> {
 
 fn query_ref(deps: Deps, symbol: &str) -> StdResult<RefData> {
     if symbol == "USD" {
-        return Ok(RefData::new(E9, u64::MAX, 0));
+        return Ok(RefData::new(E9, Uint64::MAX, Uint64::zero()));
+    } else {
+        REFDATA.load(deps.storage, symbol)
     }
-
-    REFDATA.load(deps.storage, symbol)
 }
 
-fn query_reference_data(deps: Deps, symbol_pair: (String, String)) -> StdResult<ReferenceData> {
+fn query_reference_data(deps: Deps, symbol_pair: &(String, String)) -> StdResult<ReferenceData> {
     let base = query_ref(deps, &symbol_pair.0)?;
     let quote = query_ref(deps, &symbol_pair.1)?;
 
     Ok(ReferenceData::new(
-        base.rate.full_mul(E9 * E9) / Uint256::from_uint128(quote.rate),
+        Uint256::from(base.rate)
+            .checked_mul(E18)?
+            .checked_div(Uint256::from(quote.rate))?,
         base.resolve_time,
         quote.resolve_time,
     ))
@@ -221,11 +224,11 @@ fn query_reference_data(deps: Deps, symbol_pair: (String, String)) -> StdResult<
 
 fn query_reference_data_bulk(
     deps: Deps,
-    symbol_pairs: Vec<(String, String)>,
+    symbol_pairs: &[(String, String)],
 ) -> StdResult<Vec<ReferenceData>> {
     symbol_pairs
         .iter()
-        .map(|pair| query_reference_data(deps, pair.clone()))
+        .map(|pair| query_reference_data(deps, pair))
         .collect()
 }
 
@@ -270,9 +273,9 @@ mod tests {
         mut deps: DepsMut,
         sender: &str,
         relayers: Vec<String>,
-        symbol_rates: Vec<(String, Uint128)>,
-        resolve_time: u64,
-        request_id: u64,
+        symbol_rates: Vec<(String, Uint64)>,
+        resolve_time: Uint64,
+        request_id: Uint64,
     ) {
         setup_relayers(deps.branch(), sender, relayers.clone());
 
@@ -437,21 +440,21 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
 
             let msg = Relay {
                 symbol_rates: zip(symbols.clone(), rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 100,
-                request_id: 1,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(100u64),
+                request_id: Uint64::one(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
             // Check if relay was successful
             let reference_datas = query_reference_data_bulk(
                 deps.as_ref(),
-                symbols
+                &symbols
                     .clone()
                     .iter()
                     .map(|s| (s.clone(), String::from("USD")))
@@ -461,13 +464,13 @@ mod tests {
             let retrieved_rates = reference_datas
                 .clone()
                 .into_iter()
-                .map(|rd| rd.rate / Uint256::from_uint128(E9))
+                .map(|rd| rd.rate / Uint256::from(E9))
                 .collect::<Vec<Uint256>>();
             assert_eq!(
                 retrieved_rates,
                 rates
                     .iter()
-                    .map(|r| Uint256::from_uint128(*r))
+                    .map(|r| Uint256::from(*r))
                     .collect::<Vec<Uint256>>()
             );
         }
@@ -488,13 +491,13 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = Relay {
                 symbol_rates: zip(symbols.clone(), rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 100,
-                request_id: 1,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(100u64),
+                request_id: Uint64::one(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -503,19 +506,19 @@ mod tests {
             let env = mock_env();
             let old_rates = [1, 2, 3]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = Relay {
-                symbol_rates: zip(symbols.clone(), old_rates).collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 90,
-                request_id: 1,
+                symbol_rates: zip(symbols.clone(), old_rates).collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(90u64),
+                request_id: Uint64::one(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
             // Check if relay was successful
             let reference_datas = query_reference_data_bulk(
                 deps.as_ref(),
-                symbols
+                &symbols
                     .clone()
                     .iter()
                     .map(|s| (s.clone(), String::from("USD")))
@@ -525,13 +528,13 @@ mod tests {
             let retrieved_rates = reference_datas
                 .clone()
                 .into_iter()
-                .map(|rd| rd.rate / Uint256::from_uint128(E9))
+                .map(|rd| rd.rate / Uint256::from(E9))
                 .collect::<Vec<Uint256>>();
             assert_eq!(
                 retrieved_rates,
                 rates
                     .iter()
-                    .map(|r| Uint256::from_uint128(*r))
+                    .map(|r| Uint256::from(*r))
                     .collect::<Vec<Uint256>>()
             );
         }
@@ -552,12 +555,12 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = Relay {
-                symbol_rates: zip(symbols.clone(), rates).collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 10,
-                request_id: 1,
+                symbol_rates: zip(symbols.clone(), rates).collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(10u64),
+                request_id: Uint64::one(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -565,9 +568,9 @@ mod tests {
             let info = mock_info(relayer.as_str(), &[]);
             let env = mock_env();
             let msg = Relay {
-                symbol_rates: vec![(String::from("AAA"), Uint128::new(99999))],
-                resolve_time: 20,
-                request_id: 3,
+                symbol_rates: vec![(String::from("AAA"), Uint64::new(99999))],
+                resolve_time: Uint64::from(20u64),
+                request_id: Uint64::from(3u64),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -576,20 +579,19 @@ mod tests {
             let env = mock_env();
             let update_rates = [1, 2, 3]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = Relay {
-                symbol_rates: zip(symbols.clone(), update_rates)
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 15,
-                request_id: 2,
+                symbol_rates: zip(symbols.clone(), update_rates).collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(15u64),
+                request_id: Uint64::from(2u64),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
             // Check if relay was successful
             let reference_datas = query_reference_data_bulk(
                 deps.as_ref(),
-                symbols
+                &symbols
                     .clone()
                     .iter()
                     .map(|s| (s.clone(), String::from("USD")))
@@ -599,7 +601,7 @@ mod tests {
             let retrieved_rates = reference_datas
                 .clone()
                 .into_iter()
-                .map(|rd| rd.rate / Uint256::from_uint128(E9))
+                .map(|rd| rd.rate / Uint256::from(E9))
                 .collect::<Vec<Uint256>>();
             let expected_rates = vec![99999, 2, 3]
                 .iter()
@@ -623,13 +625,13 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = Relay {
                 symbol_rates: zip(symbols.clone(), rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 0,
-                request_id: 0,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::zero(),
+                request_id: Uint64::zero(),
             };
             let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
             assert_eq!(
@@ -656,13 +658,13 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = ForceRelay {
                 symbol_rates: zip(symbols.clone(), rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 100,
-                request_id: 2,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(100u64),
+                request_id: Uint64::from(2u64),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
@@ -671,20 +673,20 @@ mod tests {
             let env = mock_env();
             let forced_rates = [1, 2, 3]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = ForceRelay {
                 symbol_rates: zip(symbols.clone(), forced_rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 90,
-                request_id: 1,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::from(90u64),
+                request_id: Uint64::one(),
             };
             execute(deps.as_mut(), env, info, msg).unwrap();
 
             // Check if forced relay was successful
             let reference_datas = query_reference_data_bulk(
                 deps.as_ref(),
-                symbols
+                &symbols
                     .clone()
                     .iter()
                     .map(|s| (s.clone(), String::from("USD")))
@@ -693,13 +695,13 @@ mod tests {
             .unwrap();
             let retrieved_rates = reference_datas
                 .into_iter()
-                .map(|rd| rd.rate / Uint256::from_uint128(E9))
+                .map(|rd| rd.rate / Uint256::from(E9))
                 .collect::<Vec<Uint256>>();
             assert_eq!(
                 retrieved_rates,
                 forced_rates
                     .iter()
-                    .map(|r| Uint256::from_uint128(*r))
+                    .map(|r| Uint256::from(*r))
                     .collect::<Vec<Uint256>>()
             );
         }
@@ -719,13 +721,13 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             let msg = ForceRelay {
                 symbol_rates: zip(symbols.clone(), rates.clone())
-                    .collect::<Vec<(String, Uint128)>>(),
-                resolve_time: 0,
-                request_id: 0,
+                    .collect::<Vec<(String, Uint64)>>(),
+                resolve_time: Uint64::zero(),
+                request_id: Uint64::zero(),
             };
             let err = execute(deps.as_mut(), env, info, msg).unwrap_err();
             assert_eq!(
@@ -739,6 +741,7 @@ mod tests {
 
     mod query {
         use std::iter::zip;
+        use std::ops::Mul;
 
         use cosmwasm_std::from_binary;
 
@@ -784,14 +787,14 @@ mod tests {
             let mut deps = mock_dependencies();
             let relayer = String::from("relayer");
             let symbol = vec![String::from("AAA")];
-            let rate = vec![Uint128::new(1000)];
+            let rate = vec![Uint64::new(1000)];
             setup_relays(
                 deps.as_mut(),
                 "owner",
                 vec![relayer.clone()],
                 zip(symbol.clone(), rate.clone()).collect(),
-                100,
-                1,
+                Uint64::from(100u64),
+                Uint64::one(),
             );
 
             // Test if get_ref results are correct
@@ -802,7 +805,7 @@ mod tests {
             let binary_res = query(deps.as_ref(), env, msg).unwrap();
             assert_eq!(
                 from_binary::<RefData>(&binary_res).unwrap(),
-                RefData::new(rate[0], 100, 1)
+                RefData::new(rate[0], Uint64::from(100u64), Uint64::one())
             );
 
             // Test invalid symbol
@@ -820,14 +823,14 @@ mod tests {
             let mut deps = mock_dependencies();
             let relayer = String::from("relayer");
             let symbol = vec![String::from("AAA")];
-            let rate = vec![Uint128::new(1000)];
+            let rate = vec![Uint64::new(1000)];
             setup_relays(
                 deps.as_mut(),
                 "owner",
                 vec![relayer.clone()],
                 zip(symbol.clone(), rate.clone()).collect(),
-                100,
-                1,
+                Uint64::from(100u64),
+                Uint64::one(),
             );
 
             // Test if get_reference_data results are correct
@@ -838,7 +841,11 @@ mod tests {
             let binary_res = query(deps.as_ref(), env, msg).unwrap();
             assert_eq!(
                 from_binary::<ReferenceData>(&binary_res).unwrap(),
-                ReferenceData::new(rate[0].full_mul(E9), 100, u64::MAX)
+                ReferenceData::new(
+                    Uint256::from(rate[0]).mul(Uint256::from(E9)),
+                    Uint64::from(100u64),
+                    Uint64::MAX,
+                )
             );
 
             // Test invalid symbol
@@ -868,15 +875,15 @@ mod tests {
                 .collect::<Vec<String>>();
             let rates = [1000, 2000, 3000]
                 .iter()
-                .map(|r| Uint128::new(*r))
-                .collect::<Vec<Uint128>>();
+                .map(|r| Uint64::new(*r))
+                .collect::<Vec<Uint64>>();
             setup_relays(
                 deps.as_mut(),
                 "owner",
                 vec![relayer.clone()],
                 zip(symbols.clone(), rates.clone()).collect(),
-                100,
-                1,
+                Uint64::from(100u64),
+                Uint64::one(),
             );
 
             // Test if get_reference_data results are correct
@@ -891,7 +898,13 @@ mod tests {
             let binary_res = query(deps.as_ref(), env, msg).unwrap();
             let expected_res = rates
                 .iter()
-                .map(|r| ReferenceData::new(r.full_mul(E9), 100, u64::MAX))
+                .map(|r| {
+                    ReferenceData::new(
+                        Uint256::from(*r).mul(Uint256::from(E9)),
+                        Uint64::from(100u64),
+                        Uint64::MAX,
+                    )
+                })
                 .collect::<Vec<ReferenceData>>();
             assert_eq!(
                 from_binary::<Vec<ReferenceData>>(&binary_res).unwrap(),

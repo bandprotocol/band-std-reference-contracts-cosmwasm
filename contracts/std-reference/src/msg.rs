@@ -1,5 +1,5 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::Uint128;
+use cosmwasm_std::Uint64;
 
 use crate::state::{RefData, ReferenceData};
 
@@ -33,17 +33,17 @@ pub enum ExecuteMsg {
         // e.g.
         // BTC = 19,343.34, ETH = 1,348.57
         // symbol_rates ≡ <("BTC", 19343340000000), ("ETH", 1348570000000)>
-        symbol_rates: Vec<(String, Uint128)>,
+        symbol_rates: Vec<(String, Uint64)>,
         // Resolve time of request on BandChain in Unix timestamp
-        resolve_time: u64,
+        resolve_time: Uint64,
         // Request ID of the results on BandChain
-        request_id: u64,
+        request_id: Uint64,
     },
     // Same as Relay but without the resolve_time guard
     ForceRelay {
-        symbol_rates: Vec<(String, Uint128)>,
-        resolve_time: u64,
-        request_id: u64,
+        symbol_rates: Vec<(String, Uint64)>,
+        resolve_time: Uint64,
+        request_id: Uint64,
     },
 }
 

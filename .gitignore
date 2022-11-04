@@ -1,2 +1,3 @@
-/target
-/artifacts
+debug/
+target/
+artifacts/

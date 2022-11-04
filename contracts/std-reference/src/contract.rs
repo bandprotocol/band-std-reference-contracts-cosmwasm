@@ -22,7 +22,7 @@ pub fn instantiate(
     _env: Env,
     info: MessageInfo,
     _msg: InstantiateMsg,
-) -> StdResult<Response> {
+) -> Result<Response, ContractError> {
     // Set contract version
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
@@ -203,7 +203,7 @@ fn query_is_relayer(deps: Deps, relayer: &Addr) -> StdResult<bool> {
 
 fn query_ref(deps: Deps, symbol: &str) -> StdResult<RefData> {
     if symbol == "USD" {
-        return Ok(RefData::new(E9, Uint64::MAX, Uint64::zero()));
+        Ok(RefData::new(E9, Uint64::MAX, Uint64::zero()))
     } else {
         REFDATA.load(deps.storage, symbol)
     }

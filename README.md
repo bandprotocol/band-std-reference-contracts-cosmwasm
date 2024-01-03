@@ -3,7 +3,7 @@
 ## Overview
 
 This repository contains the CosmWasm code for Band Protocol's StdReference contracts. The live contract addresses can
-be found in our [documentation](https://docs.bandchain.org/band-standard-dataset/supported-blockchains.html).
+be found in our [documentation](https://docs.bandchain.org/develop/supported-blockchains).
 
 ## Build
 
